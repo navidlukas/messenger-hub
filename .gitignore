@@ -1,0 +1,12 @@
+# Build output
+dist/
+bin/
+obj/
+
+# App runtime data (logins, cache, settings) — never commit
+data/
+reset.pending
+
+# NuGet
+packages/
+*.user

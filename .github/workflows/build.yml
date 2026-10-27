@@ -1,0 +1,51 @@
+name: Build and Release
+
+# Builds the portable app on Windows and publishes it as a downloadable release zip.
+# Runs on every push to main; also makes a GitHub Release so the in-app updater can find it.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Read version from project
+        id: ver
+        shell: pwsh
+        run: |
+          [xml]$proj = Get-Content MessengerHub.csproj
+          $v = ($proj.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1)
+          if (-not $v) { $v = "0.0.0" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build (Release)
+        run: dotnet build MessengerHub.csproj -c Release -o dist/MessengerHub
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/MessengerHub/* -DestinationPath MessengerHub-${{ steps.ver.outputs.version }}.zip -Force
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Messenger Hub ${{ steps.ver.outputs.version }}
+          files: MessengerHub-${{ steps.ver.outputs.version }}.zip
+          fail_on_unmatched_files: true

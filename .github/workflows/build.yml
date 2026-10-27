@@ -46,7 +46,7 @@ jobs:
           Compress-Archive -Path dist/MessengerHub/* -DestinationPath MessengerHub-${{ steps.ver.outputs.version }}.zip -Force
 
       - name: Install Inno Setup
-        run: choco install innosetup --version=6.2.2 -y --no-progress
+        run: choco install innosetup -y --no-progress
 
       - name: Build installer
         shell: pwsh

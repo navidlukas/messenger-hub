@@ -26,10 +26,6 @@ DisableProgramGroupPage=yes
 DefaultGroupName=Messenger Hub
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
-; x64 app.
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
-
 ; If the app (or its tray) is running during an upgrade, close it first.
 CloseApplications=yes
 RestartApplications=no

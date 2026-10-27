@@ -153,6 +153,7 @@ namespace MessengerHub
             AddServiceItems(add.DropDownItems);
             app.DropDownItems.Add(add);
             app.DropDownItems.Add(new ToolStripSeparator());
+            app.DropDownItems.Add("Check for &updates...", null, async (s, e) => await CheckForUpdatesAsync());
             app.DropDownItems.Add("&Clear cache...", null, async (s, e) => await ClearCacheAsync());
             app.DropDownItems.Add("&Reset Messenger Hub...", null, (s, e) => ResetApp());
             app.DropDownItems.Add(new ToolStripSeparator());
@@ -431,6 +432,44 @@ namespace MessengerHub
                 return int.TryParse(r, out int n) && n >= 0 && n < 25;
             }
             catch { return false; }
+        }
+
+        /// <summary>Menu &gt; Check for updates: check now and, if one is ready, offer to restart and apply it.</summary>
+        private async Task CheckForUpdatesAsync()
+        {
+            Cursor = Cursors.WaitCursor;
+            Updater.CheckResult result;
+            try { result = await Task.Run(() => Updater.CheckNow()); }
+            finally { Cursor = Cursors.Default; }
+
+            switch (result)
+            {
+                case Updater.CheckResult.Ready:
+                    string v = Updater.PendingVersion();
+                    var ans = MessageBox.Show(this,
+                        "Update " + (v ?? "") + " is downloaded and ready.\n\n" +
+                        "Restart Messenger Hub now to apply it?\n" +
+                        "(If you choose No, it installs automatically next time you quit.)",
+                        AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                    if (ans == DialogResult.Yes)
+                    {
+                        Updater.RequestRelaunchOnExit = true; // install on exit, then reopen
+                        ExitApp();
+                    }
+                    break;
+
+                case Updater.CheckResult.UpToDate:
+                    MessageBox.Show(this,
+                        "You're on the latest version (" + Updater.CurrentVersion + ").",
+                        AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    break;
+
+                default:
+                    MessageBox.Show(this,
+                        "Couldn't check for updates right now.\nCheck your internet connection and try again.",
+                        AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    break;
+            }
         }
 
         // ------------------------------------------------------------------ Accounts

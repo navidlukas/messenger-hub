@@ -98,8 +98,9 @@ namespace MessengerHub
                     security.TrimCaches();
                     security.LockProfiles();
 
-                    // If a newer build is staged, install it quietly now (no relaunch: the user quit).
-                    Updater.LaunchRunner(false);
+                    // If a newer build is staged, install it now. Relaunch only when the user asked to
+                    // update-and-restart from the menu; a plain quit installs quietly without reopening.
+                    Updater.LaunchRunner(Updater.RequestRelaunchOnExit);
                 }
                 finally
                 {

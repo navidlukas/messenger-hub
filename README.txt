@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.12 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
+MESSENGER HUB  v0.13 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
 =============================================================
 
 INSTALL (easiest)
@@ -49,6 +49,8 @@ AUTOMATIC UPDATES
     found it downloads quietly (into data\update) while you keep working - no pop-ups.
   - The new version is installed only when you quit (tray > Exit), or the next time you
     start the app. Your accounts, logins and settings in data\ are never touched.
+  - To update on demand, use Menu > Check for updates... It checks right away and, if a
+    new version is ready, offers to restart and apply it immediately.
   - If an install ever fails it rolls back to the current version automatically. A log
     is kept at data\update\update.log.
   - Updates come from this app's own GitHub releases; nothing else is sent anywhere.

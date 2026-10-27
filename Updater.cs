@@ -42,6 +42,11 @@ namespace MessengerHub
 
         private static int running; // 0/1 guard against overlapping checks
 
+        /// <summary>Set before exit when a staged update should be installed AND the app relaunched.</summary>
+        public static bool RequestRelaunchOnExit;
+
+        public enum CheckResult { UpToDate, Ready, Failed }
+
         private static readonly HttpClient http = CreateClient();
 
         private static HttpClient CreateClient()
@@ -80,39 +85,66 @@ namespace MessengerHub
                 if (HasPendingUpdate()) return;                     // already staged, waiting to apply
                 if (DateTime.UtcNow - ReadLastCheck() < CheckEvery) return;
                 WriteLastCheck(DateTime.UtcNow);                    // record now so a failure won't retry each tick
-                RunCheck();
+                RunCheckCore();
             }
             finally { Interlocked.Exchange(ref running, 0); }
         }
 
-        private static void RunCheck()
+        /// <summary>
+        /// Manual "Check for updates" (ignores the weekly timer). Safe to call from the UI thread via
+        /// Task.Run. Returns Ready if a newer build is staged and waiting, UpToDate if none, Failed on error.
+        /// </summary>
+        public static CheckResult CheckNow()
+        {
+            if (Interlocked.Exchange(ref running, 1) == 1)         // a check is already running
+                return HasPendingUpdate() ? CheckResult.Ready : CheckResult.UpToDate;
+            try
+            {
+                Directory.CreateDirectory(UpdateDir);
+                if (HasPendingUpdate()) return CheckResult.Ready;
+                WriteLastCheck(DateTime.UtcNow);
+                return RunCheckCore();
+            }
+            catch (Exception ex) { Log("manual check error: " + ex.Message); return CheckResult.Failed; }
+            finally { Interlocked.Exchange(ref running, 0); }
+        }
+
+        /// <summary>The version waiting to be installed, or null if none.</summary>
+        public static string PendingVersion()
+        {
+            try { return ReadFlag().TryGet("version"); } catch { return null; }
+        }
+
+        private static CheckResult RunCheckCore()
         {
             string json = HttpGet(LatestApi);
-            if (json == null) return;
+            if (json == null) return CheckResult.Failed;
 
             Version latest = ParseTag(Extract(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\""));
-            if (latest == null || latest <= CurrentVersion) return;
+            if (latest == null) return CheckResult.Failed;
+            if (latest <= CurrentVersion) return CheckResult.UpToDate;
 
             string url = FindZipAsset(json);
-            if (url == null) { Log("no .zip asset in latest release"); return; }
+            if (url == null) { Log("no .zip asset in latest release"); return CheckResult.Failed; }
 
             SafeDelete(DownloadDir);
             Directory.CreateDirectory(DownloadDir);
             string zipPath = Path.Combine(DownloadDir, "update.zip");
-            if (!Download(url, zipPath)) { SafeDelete(DownloadDir); return; }
+            if (!Download(url, zipPath)) { SafeDelete(DownloadDir); return CheckResult.Failed; }
 
             string staged = Path.Combine(StagedRoot, latest.ToString());
             SafeDelete(staged);
             Directory.CreateDirectory(staged);
             try { ZipFile.ExtractToDirectory(zipPath, staged); }
-            catch (Exception ex) { Log("extract failed: " + ex.Message); SafeDelete(staged); SafeDelete(DownloadDir); return; }
+            catch (Exception ex) { Log("extract failed: " + ex.Message); SafeDelete(staged); SafeDelete(DownloadDir); return CheckResult.Failed; }
             SafeDelete(DownloadDir);
 
             string appRoot = LocateApp(staged);
-            if (appRoot == null) { Log("MessengerHub.exe not found in download"); SafeDelete(staged); return; }
+            if (appRoot == null) { Log("MessengerHub.exe not found in download"); SafeDelete(staged); return CheckResult.Failed; }
 
             WriteFlag(latest, appRoot);
             Log("staged update " + latest);
+            return CheckResult.Ready;
         }
 
         // ---------------------------------------------------------------- applying

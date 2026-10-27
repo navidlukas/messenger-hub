@@ -45,10 +45,21 @@ jobs:
         run: |
           Compress-Archive -Path dist/MessengerHub/* -DestinationPath MessengerHub-${{ steps.ver.outputs.version }}.zip -Force
 
+      - name: Install Inno Setup
+        run: choco install innosetup --version=6.2.2 -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} installer.iss
+          Copy-Item dist/MessengerHub-Setup.exe MessengerHub-Setup-${{ steps.ver.outputs.version }}.exe -Force
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: Messenger Hub ${{ steps.ver.outputs.version }}
-          files: MessengerHub-${{ steps.ver.outputs.version }}.zip
+          files: |
+            MessengerHub-Setup-${{ steps.ver.outputs.version }}.exe
+            MessengerHub-${{ steps.ver.outputs.version }}.zip
           fail_on_unmatched_files: true

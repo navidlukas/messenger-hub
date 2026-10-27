@@ -1,7 +1,14 @@
-MESSENGER HUB  v0.8  (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
+MESSENGER HUB  v0.9  (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
 =============================================================
 
-BUILD (one time)
+INSTALL (easiest)
+  Download MessengerHub-Setup.exe from the Releases page and run it.
+  Windows SmartScreen shows one "unrecognized app" warning on the installer
+  (the app is not code-signed): click "More info" then "Run anyway". After that
+  the app and all future updates run with no warning. It installs per-user
+  (no admin) and makes a Start Menu shortcut.
+
+BUILD INSTEAD (optional, from source)
   1. Install the .NET SDK: https://dotnet.microsoft.com/download
   2. Double-click build.bat
   3. The finished app appears in: dist\MessengerHub

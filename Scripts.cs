@@ -120,6 +120,38 @@ namespace MessengerHub
 })()
 ";
 
+        /// <summary>
+        /// Slack doesn't put the count in the tab title either. Count the unread (non-muted)
+        /// conversations in the sidebar. Same selector other messenger wrappers use.
+        /// </summary>
+        public const string SlackUnread = @"
+(() => {
+  try {
+    const sel = '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted)';
+    return document.querySelectorAll(sel).length;
+  } catch (e) { return -1; }
+})()
+";
+
+        /// <summary>
+        /// Google Messages: count conversation rows marked unread. Its markup isn't documented, so
+        /// this is best-effort (host 'unread' class or the data-e2e-is-unread marker); if neither is
+        /// present it returns 0 rather than a wrong number.
+        /// </summary>
+        public const string GoogleMessagesUnread = @"
+(() => {
+  try {
+    const items = document.querySelectorAll('mws-conversation-list-item');
+    let n = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.classList.contains('unread') || it.querySelector('[data-e2e-is-unread=true]')) n++;
+    }
+    return n;
+  } catch (e) { return -1; }
+})()
+";
+
         /// <summary>Facebook puts your profile name in the page data (CurrentUserInitialData ... NAME). Email is never on the page.</summary>
         public const string FacebookName = @"
 (() => {

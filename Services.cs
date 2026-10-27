@@ -82,6 +82,7 @@ namespace MessengerHub
             Color = Color.FromArgb(26, 115, 232),
             Letter = "G",
             AllowPopups = true, // let Google's sign-in/consent popups open inside the app, not the external browser
+            UnreadScript = Scripts.GoogleMessagesUnread,
         };
 
         public static readonly ServiceType Slack = new ServiceType
@@ -95,6 +96,7 @@ namespace MessengerHub
             // Its heavy part is the app shell, which we keep (not trimmed), so the default 300 is plenty;
             // calibration adjusts it anyway.
             AllowPopups = true, // let Slack's SSO sign-in popups open inside the app
+            UnreadScript = Scripts.SlackUnread, // its tab title doesn't carry the unread count reliably
         };
 
         public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, WeChat, GoogleMessages, Slack };

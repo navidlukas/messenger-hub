@@ -19,6 +19,7 @@ namespace MessengerHub
         public bool AllowPopups;    // open same-site pop-up windows inside the app (e.g. calls)
         public string IconPage;     // only save the site icon on pages containing this (null = any page)
         public string IdentityScript; // returns the logged-in phone number / name, or null (auto-naming)
+        public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
         public int CacheLimitMB = 300; // clear this account's media cache on exit once it passes this size
 
         public static readonly ServiceType WhatsApp = new ServiceType
@@ -41,6 +42,7 @@ namespace MessengerHub
             Color = Color.FromArgb(42, 171, 238),
             Letter = "T",
             IdentityScript = Scripts.TelegramNumber,
+            UnreadScript = Scripts.TelegramUnread, // its tab title doesn't carry the unread count reliably
         };
 
         // messenger.com was shut down by Meta in April 2026; Messenger now lives on facebook.com.

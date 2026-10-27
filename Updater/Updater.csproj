@@ -12,7 +12,7 @@
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- Keep in step with the app version it ships alongside -->
-    <Version>0.10.0</Version>
+    <Version>0.11.0</Version>
     <Product>Messenger Hub Updater</Product>
   </PropertyGroup>
 

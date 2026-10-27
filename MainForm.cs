@@ -67,6 +67,10 @@ namespace MessengerHub
         private readonly System.Windows.Forms.Timer identityTimer = new System.Windows.Forms.Timer { Interval = 10 * 1000 };
         private readonly HashSet<Account> identityBusy = new HashSet<Account>();
 
+        // Unread polling: for services whose tab title doesn't carry the count (e.g. Telegram),
+        // read it from the page every few seconds instead.
+        private readonly System.Windows.Forms.Timer unreadTimer = new System.Windows.Forms.Timer { Interval = 4000 };
+
         // Drag-to-reorder state.
         private readonly Panel dropIndicator = new Panel();
         private Account dragAcc;
@@ -110,6 +114,7 @@ namespace MessengerHub
                 showSignalWait?.Unregister(null);
                 refreshTimer.Dispose();
                 identityTimer.Dispose();
+                unreadTimer.Dispose();
                 startupWatchdog?.Dispose();
                 tray.Dispose();
                 foreach (var ic in trayIcons) ic?.Dispose();
@@ -120,6 +125,9 @@ namespace MessengerHub
 
             identityTimer.Tick += async (s, e) => { await AutoNameTickAsync(); CalibrateCacheTick(); };
             identityTimer.Start();
+
+            unreadTimer.Tick += async (s, e) => await UnreadPollAsync();
+            unreadTimer.Start();
 
             // Hidden in tray or minimized -> all accounts go to background mode.
             VisibleChanged += (s, e) => ApplyBackgroundState();
@@ -1029,8 +1037,38 @@ namespace MessengerHub
         // Messengers put the unread count in the page title, e.g. "(3) WhatsApp".
         private static readonly Regex UnreadPattern = new Regex(@"\((\d+)\+?\)");
 
+        /// <summary>
+        /// For services whose tab title doesn't carry the unread count (e.g. Telegram), read it from
+        /// the page. Runs for background accounts too, so their sidebar badge stays current.
+        /// </summary>
+        private async Task UnreadPollAsync()
+        {
+            foreach (var acc in accounts.ToList())
+            {
+                if (acc.View.IsDisposed) continue;
+                var script = acc.Service.UnreadScript;
+                if (script == null) continue;
+                var core = acc.View.CoreWebView2;
+                if (core == null) continue;
+                try
+                {
+                    string r = await core.ExecuteScriptAsync(script);
+                    if (int.TryParse((r ?? "").Trim('"'), out int n) && n >= 0 && n != acc.Unread)
+                    {
+                        acc.Unread = n;
+                        RefreshButton(acc);
+                        UpdateTitle();
+                    }
+                }
+                catch { /* page not ready / account removed */ }
+            }
+        }
+
         private void UpdateUnread(Account acc, string title)
         {
+            // Services with a DOM-based unread reader are driven by UnreadPollAsync, not the tab title.
+            if (acc.Service.UnreadScript != null) return;
+
             var m = UnreadPattern.Match(title ?? "");
             acc.Unread = m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
             RefreshButton(acc);

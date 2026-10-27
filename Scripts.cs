@@ -96,6 +96,30 @@ namespace MessengerHub
 })()
 ";
 
+        // ---------------------------------------------------------------- Unread counts
+        // Returns the total unread message count as a number, or -1 if it can't be read.
+        // Used for services whose browser tab title doesn't carry the count reliably.
+
+        /// <summary>
+        /// Telegram Web (web.telegram.org/a/) often doesn't put the unread count in the tab title,
+        /// so read it from the chat list instead: sum the unread (non-muted) badges on private and
+        /// group chats. Same approach other messenger wrappers use.
+        /// </summary>
+        public const string TelegramUnread = @"
+(() => {
+  try {
+    const sel = '.chat-list .ListItem.private .ChatBadge.unread:not(.muted), .chat-list .ListItem.group .ChatBadge.unread:not(.muted)';
+    const els = document.querySelectorAll(sel);
+    let n = 0;
+    for (const el of els) {
+      const v = parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10);
+      if (!isNaN(v)) n += v;
+    }
+    return n;
+  } catch (e) { return -1; }
+})()
+";
+
         /// <summary>Facebook puts your profile name in the page data (CurrentUserInitialData ... NAME). Email is never on the page.</summary>
         public const string FacebookName = @"
 (() => {

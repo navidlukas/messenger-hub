@@ -110,6 +110,7 @@ namespace MessengerHub
                 showSignalWait?.Unregister(null);
                 refreshTimer.Dispose();
                 identityTimer.Dispose();
+                startupWatchdog?.Dispose();
                 tray.Dispose();
                 foreach (var ic in trayIcons) ic?.Dispose();
             };
@@ -366,8 +367,62 @@ namespace MessengerHub
 
             await Task.WhenAll(accounts.ToList().Select(InitAccountAsync));
 
+            // Some accounts occasionally hang on their own loading screen when many load at
+            // once; reload any that are still stuck a short time after startup (once each).
+            StartStartupWatchdog();
+
             // Check for a new version in the background (silent, at most once a week).
             Updater.StartBackgroundCheck();
+        }
+
+        // ------------------------------------------------------------------ Startup load recovery
+
+        private const int MaxStartupReloads = 2;
+        private System.Windows.Forms.Timer startupWatchdog;
+
+        /// <summary>
+        /// ~20s after startup, reload any account that never finished loading, and the account
+        /// you're looking at if it still appears blank (e.g. stuck on a spinner). One-shot.
+        /// </summary>
+        private void StartStartupWatchdog()
+        {
+            startupWatchdog?.Dispose();
+            startupWatchdog = new System.Windows.Forms.Timer { Interval = 20000 };
+            startupWatchdog.Tick += async (s, e) =>
+            {
+                startupWatchdog.Stop();
+                foreach (var acc in accounts.ToList()) await CheckStartupLoad(acc);
+            };
+            startupWatchdog.Start();
+        }
+
+        private async Task CheckStartupLoad(Account acc)
+        {
+            if (acc.View.IsDisposed) return;
+            var core = acc.View.CoreWebView2;
+            if (core == null || acc.StartupReloads >= MaxStartupReloads) return;
+
+            bool stuck = !acc.FirstLoadOk;                 // a navigation never completed
+            if (!stuck && acc == active)                   // loaded but maybe spinning: probe the one in view
+                stuck = await LooksBlank(core);
+
+            if (stuck)
+            {
+                acc.StartupReloads++;
+                try { core.Reload(); } catch { }
+            }
+        }
+
+        /// <summary>True if the page shows almost no text — a good sign it's stuck on a loading screen.</summary>
+        private static async Task<bool> LooksBlank(CoreWebView2 core)
+        {
+            try
+            {
+                string r = await core.ExecuteScriptAsync(
+                    "(function(){try{var b=document.body;return b?b.innerText.replace(/\\s+/g,'').length:0;}catch(e){return -1;}})()");
+                return int.TryParse(r, out int n) && n >= 0 && n < 25;
+            }
+            catch { return false; }
         }
 
         // ------------------------------------------------------------------ Accounts
@@ -742,7 +797,18 @@ namespace MessengerHub
                         OpenExternal(e.Uri);
                     }
                 };
-                core.NavigationCompleted += (s, e) => { if (e.IsSuccess) acc.LoadedAt = DateTime.UtcNow; };
+                core.NavigationCompleted += (s, e) =>
+                {
+                    if (e.IsSuccess) { acc.LoadedAt = DateTime.UtcNow; acc.FirstLoadOk = true; }
+                };
+                // If the page's process crashes, reload it once (rate-limited so it can't loop).
+                core.ProcessFailed += (s, e) =>
+                {
+                    if (acc.View.IsDisposed) return;
+                    if (DateTime.UtcNow - acc.LastRecoverUtc < TimeSpan.FromSeconds(20)) return;
+                    acc.LastRecoverUtc = DateTime.UtcNow;
+                    try { acc.View.CoreWebView2?.Reload(); } catch { }
+                };
                 core.FaviconChanged += async (s, e) => await CaptureIconAsync(acc);
 
                 // Videos/GIFs only play when clicked (saves CPU).

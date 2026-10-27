@@ -23,6 +23,9 @@ namespace MessengerHub
         public AccountButton Button;
         public int Unread;
         public DateTime LoadedAt = DateTime.UtcNow; // last full page load (for auto-refresh)
+        public bool FirstLoadOk;                     // a top-level navigation has succeeded at least once
+        public int StartupReloads;                   // auto-reloads used by the startup stuck-load watchdog
+        public DateTime LastRecoverUtc = DateTime.MinValue; // last crash-recovery reload (rate limit)
 
         public string TooltipText()
         {

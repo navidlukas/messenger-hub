@@ -365,6 +365,9 @@ namespace MessengerHub
             SelectAccount(accounts.FirstOrDefault(a => a.Id == last) ?? accounts.FirstOrDefault());
 
             await Task.WhenAll(accounts.ToList().Select(InitAccountAsync));
+
+            // Check for a new version in the background (silent, at most once a week).
+            Updater.StartBackgroundCheck();
         }
 
         // ------------------------------------------------------------------ Accounts
@@ -799,6 +802,9 @@ namespace MessengerHub
         /// </summary>
         private void AutoRefreshTick()
         {
+            // Long-running sessions: re-evaluate the weekly update check (cheap no-op until due).
+            Updater.StartBackgroundCheck();
+
             var due = accounts
                 .Where(a => a.View.CoreWebView2 != null && !IsForeground(a) &&
                             DateTime.UtcNow - a.LoadedAt >= AutoRefreshAfter)

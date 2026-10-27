@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.7  (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
+MESSENGER HUB  v0.8  (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
 =============================================================
 
 BUILD (one time)
@@ -37,6 +37,18 @@ USING IT
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
 
+AUTOMATIC UPDATES
+  - The app checks for a new version about once a week, in the background. If one is
+    found it downloads quietly (into data\update) while you keep working - no pop-ups.
+  - The new version is installed only when you quit (tray > Exit), or the next time you
+    start the app. Your accounts, logins and settings in data\ are never touched.
+  - If an install ever fails it rolls back to the current version automatically. A log
+    is kept at data\update\update.log.
+  - Updates come from this app's own GitHub releases; nothing else is sent anywhere.
+  - NOTE: automatic updating starts working from v0.8 onward. To move from an older
+    build to v0.8, download it once from the Releases page and unzip over your folder
+    (keep your data\ folder). After that, updates are hands-off.
+
 PASSWORD & MOVING TO ANOTHER PC
   - First run asks you to set a password. You enter it each time you START the app
     (not when reopening from the tray). There is NO recovery: if you forget it, the
@@ -64,6 +76,7 @@ PORTABLE
                          (settings.ini.bak = automatic backup of the previous version)
         security.dat  <- password check + encryption key (safe to copy; useless without your password)
         webview.key   <- portable cookie key, so Facebook stays logged in after a move
+        update\       <- temporary space used by the auto-updater (safe to delete)
 
   Close the app completely (tray > Exit) before copying the folder.
 

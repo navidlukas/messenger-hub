@@ -60,6 +60,11 @@ namespace MessengerHub
                         return;
                     }
 
+                    // A download staged on a previous run but not yet installed: install it now
+                    // and relaunch. This instance exits so its files can be replaced.
+                    if (Updater.HasPendingUpdate() && Updater.LaunchRunner(true))
+                        return;
+
                     // Password gate. Everything the app does is behind this.
                     var security = new Security();
                     if (!security.IsSet)
@@ -92,6 +97,9 @@ namespace MessengerHub
                     security.CaptureCookieKey();
                     security.TrimCaches();
                     security.LockProfiles();
+
+                    // If a newer build is staged, install it quietly now (no relaunch: the user quit).
+                    Updater.LaunchRunner(false);
                 }
                 finally
                 {

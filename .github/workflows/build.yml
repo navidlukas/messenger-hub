@@ -34,7 +34,10 @@ jobs:
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Build (Release)
+      - name: Build updater helper (Release)
+        run: dotnet build Updater/Updater.csproj -c Release -o dist/MessengerHub
+
+      - name: Build app (Release)
         run: dotnet build MessengerHub.csproj -c Release -o dist/MessengerHub
 
       - name: Package portable zip

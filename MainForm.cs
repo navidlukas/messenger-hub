@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Net.Http;
@@ -71,6 +72,10 @@ namespace MessengerHub
         // read it from the page every few seconds instead.
         private readonly System.Windows.Forms.Timer unreadTimer = new System.Windows.Forms.Timer { Interval = 4000 };
 
+        // Startup speed boost: run the app + its WebView2 processes at AboveNormal for the first minute.
+        private readonly System.Windows.Forms.Timer priorityTimer = new System.Windows.Forms.Timer { Interval = 5000 };
+        private DateTime boostUntilUtc;
+
         // Drag-to-reorder state.
         private readonly Panel dropIndicator = new Panel();
         private Account dragAcc;
@@ -115,6 +120,7 @@ namespace MessengerHub
                 refreshTimer.Dispose();
                 identityTimer.Dispose();
                 unreadTimer.Dispose();
+                priorityTimer.Dispose();
                 startupWatchdog?.Dispose();
                 tray.Dispose();
                 foreach (var ic in trayIcons) ic?.Dispose();
@@ -349,8 +355,83 @@ namespace MessengerHub
 
         // ------------------------------------------------------------------ Startup
 
+        // ------------------------------------------------------------------ Startup priority boost
+
+        /// <summary>
+        /// Run this app and all its WebView2 processes at AboveNormal priority for the first minute after
+        /// launch (so the accounts load faster under load), then drop everything back to Normal. Re-applied
+        /// every few seconds during the window so WebView2 processes spawned mid-startup are covered too.
+        /// </summary>
+        private void StartPriorityBoost()
+        {
+            boostUntilUtc = DateTime.UtcNow.AddMinutes(1);
+            SetOwnTreePriority(ProcessPriorityClass.AboveNormal);
+            priorityTimer.Tick += (s, e) =>
+            {
+                if (DateTime.UtcNow < boostUntilUtc)
+                    SetOwnTreePriority(ProcessPriorityClass.AboveNormal);
+                else
+                {
+                    SetOwnTreePriority(ProcessPriorityClass.Normal);
+                    priorityTimer.Stop();
+                }
+            };
+            priorityTimer.Start();
+        }
+
+        /// <summary>Set this process and all its descendants (the WebView2 processes) to the given priority.</summary>
+        private static void SetOwnTreePriority(ProcessPriorityClass priority)
+        {
+            try
+            {
+                int myPid = Process.GetCurrentProcess().Id;
+
+                // Map parent -> children across all processes, then collect our descendants.
+                var children = new Dictionary<int, List<int>>();
+                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId FROM Win32_Process"))
+                using (var results = searcher.Get())
+                {
+                    foreach (ManagementObject mo in results)
+                    {
+                        try
+                        {
+                            int pid = Convert.ToInt32(mo["ProcessId"]);
+                            int ppid = Convert.ToInt32(mo["ParentProcessId"]);
+                            if (!children.TryGetValue(ppid, out var list)) { list = new List<int>(); children[ppid] = list; }
+                            list.Add(pid);
+                        }
+                        catch { }
+                    }
+                }
+
+                var pids = new List<int> { myPid };
+                var queue = new Queue<int>();
+                queue.Enqueue(myPid);
+                while (queue.Count > 0)
+                {
+                    int cur = queue.Dequeue();
+                    if (children.TryGetValue(cur, out var kids))
+                        foreach (var k in kids) { pids.Add(k); queue.Enqueue(k); }
+                }
+
+                foreach (var pid in pids)
+                {
+                    try { using (var p = Process.GetProcessById(pid)) p.PriorityClass = priority; }
+                    catch { /* process gone or access denied */ }
+                }
+            }
+            catch
+            {
+                // WMI unavailable: at least set our own process.
+                try { Process.GetCurrentProcess().PriorityClass = priority; } catch { }
+            }
+        }
+
         private async Task StartAsync()
         {
+            // Give startup a head start: boost priority for the first minute, then back to Normal.
+            StartPriorityBoost();
+
             try
             {
                 // One shared browser engine; each account gets its own profile inside data\WebView2.

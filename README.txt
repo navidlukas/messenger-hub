@@ -39,6 +39,8 @@ USING IT
   - The X button hides the app to the system tray. Tray icon > right-click > Exit to quit.
   - Saving RAM/CPU: background accounts use low-memory mode, refresh themselves every
     3 hours, and videos/GIFs only play when you click them.
+  - Faster startup: for the first minute after launch the app and its browser processes run
+    at AboveNormal priority, then drop back to Normal.
   - Cache stays bounded on its own: the app measures each account's cache after a 2-minute
     warm-up and sets that account's limit to about twice that size (never below 300 MB). On
     exit, an account over its limit has its media cache cleared (app files and logins are kept).

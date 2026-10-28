@@ -177,10 +177,34 @@ namespace MessengerHub
                 AppName + " " + Application.ProductVersion + "\n\nPortable mode: all data is stored in\n" + AppPaths.Data,
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information));
 
+            // Shows each account's current cache size, measured fresh each time it's opened.
+            var size = new ToolStripMenuItem("&Size");
+            size.DropDownOpening += (s, e) => ReplaceItems(size.DropDownItems, CacheSizeItems());
+            size.DropDownItems.Add("(size)"); // placeholder: a menu needs one item to open
+
             menu.Items.Add(app);
             menu.Items.Add(accountMenu);
             menu.Items.Add(help);
+            menu.Items.Add(size);
             menu.Dock = DockStyle.Top;
+        }
+
+        /// <summary>
+        /// One line per account (in sidebar order): "Name    1,234 MB". Cache size is measured on the
+        /// spot each time the Size menu opens, so the numbers are current.
+        /// </summary>
+        private ToolStripItem[] CacheSizeItems()
+        {
+            if (accounts.Count == 0 || security == null)
+                return new ToolStripItem[] { new ToolStripMenuItem("(no accounts)") { Enabled = false } };
+
+            return accounts.Select(a =>
+            {
+                long mb = security.MeasureProfileCache(a.Id) / (1024L * 1024L);
+                string text = a.Name + "    " +
+                    mb.ToString("#,##0", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+                return (ToolStripItem)new ToolStripMenuItem(text);
+            }).ToArray();
         }
 
         private void BuildSidebar()

@@ -388,18 +388,21 @@ namespace MessengerHub
 
         private const int MaxStartupReloads = 2;
         private System.Windows.Forms.Timer startupWatchdog;
+        private int startupPasses;
 
         /// <summary>
-        /// ~20s after startup, reload any account that never finished loading, and the account
-        /// you're looking at if it still appears blank (e.g. stuck on a spinner). One-shot.
+        /// After startup, reload any account that never finished loading, and the account you're
+        /// looking at if its page didn't come up usable (e.g. a half-loaded chat list). Runs twice
+        /// (~20s and ~40s), because the first reload can itself land while startup is still busy.
         /// </summary>
         private void StartStartupWatchdog()
         {
             startupWatchdog?.Dispose();
+            startupPasses = 0;
             startupWatchdog = new System.Windows.Forms.Timer { Interval = 20000 };
             startupWatchdog.Tick += async (s, e) =>
             {
-                startupWatchdog.Stop();
+                if (++startupPasses >= 2) startupWatchdog.Stop();
                 foreach (var acc in accounts.ToList()) await CheckStartupLoad(acc);
             };
             startupWatchdog.Start();
@@ -412,8 +415,8 @@ namespace MessengerHub
             if (core == null || acc.StartupReloads >= MaxStartupReloads) return;
 
             bool stuck = !acc.FirstLoadOk;                 // a navigation never completed
-            if (!stuck && acc == active)                   // loaded but maybe spinning: probe the one in view
-                stuck = await LooksBlank(core);
+            if (!stuck && acc == active)                   // completed, but the view you see may be half-loaded
+                stuck = !await IsReady(acc);
 
             if (stuck)
             {
@@ -422,16 +425,30 @@ namespace MessengerHub
             }
         }
 
-        /// <summary>True if the page shows almost no text — a good sign it's stuck on a loading screen.</summary>
-        private static async Task<bool> LooksBlank(CoreWebView2 core)
+        /// <summary>
+        /// Is the account's page actually usable (not a half-loaded/stuck screen)? Uses the service's
+        /// ReadyScript when it has one (e.g. WhatsApp: chat list present), else falls back to "has text".
+        /// </summary>
+        private static async Task<bool> IsReady(Account acc)
         {
+            var core = acc.View.CoreWebView2;
+            if (core == null) return false;
+
+            string ready = acc.Service.ReadyScript;
+            if (ready != null)
+            {
+                try { string r = await core.ExecuteScriptAsync(ready); return (r ?? "").Trim() == "true"; }
+                catch { return false; }
+            }
+
+            // Fallback: a page with almost no text is probably stuck on a loading screen.
             try
             {
                 string r = await core.ExecuteScriptAsync(
                     "(function(){try{var b=document.body;return b?b.innerText.replace(/\\s+/g,'').length:0;}catch(e){return -1;}})()");
-                return int.TryParse(r, out int n) && n >= 0 && n < 25;
+                return !(int.TryParse(r, out int n) && n >= 0 && n < 25);
             }
-            catch { return false; }
+            catch { return true; } // unknown: assume ok, don't reload
         }
 
         /// <summary>Menu &gt; Check for updates: check now and, if one is ready, offer to restart and apply it.</summary>

@@ -120,6 +120,23 @@ namespace MessengerHub
 })()
 ";
 
+        // ---------------------------------------------------------------- Readiness
+        // Returns 'true' when the app is actually usable (not a half-loaded/stuck screen).
+
+        /// <summary>
+        /// WhatsApp is ready once the chat list pane (#pane-side) exists, or the QR login screen is
+        /// showing. The intro/loading screen has neither, so a stuck first load reads as not-ready.
+        /// </summary>
+        public const string WhatsAppReady = @"
+(() => {
+  try {
+    if (document.querySelector('#pane-side')) return true;  // chats loaded
+    if (document.querySelector('canvas')) return true;      // QR login screen
+    return false;
+  } catch (e) { return false; }
+})()
+";
+
         /// <summary>
         /// Slack doesn't put the count in the tab title either. Count the unread (non-muted)
         /// conversations in the sidebar. Same selector other messenger wrappers use.

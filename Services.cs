@@ -20,6 +20,7 @@ namespace MessengerHub
         public string IconPage;     // only save the site icon on pages containing this (null = any page)
         public string IdentityScript; // returns the logged-in phone number / name, or null (auto-naming)
         public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
+        public string ReadyScript;    // returns 'true' when the page is usable; null = fall back to a text check
         public int CacheLimitMB = 300; // clear this account's media cache on exit once it passes this size
 
         public static readonly ServiceType WhatsApp = new ServiceType
@@ -31,6 +32,7 @@ namespace MessengerHub
             Color = Color.FromArgb(37, 211, 102),
             Letter = "W",
             IdentityScript = Scripts.WhatsAppNumber,
+            ReadyScript = Scripts.WhatsAppReady, // detect a half-loaded first load (chat list missing)
         };
 
         public static readonly ServiceType Telegram = new ServiceType

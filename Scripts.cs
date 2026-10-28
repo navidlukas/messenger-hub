@@ -164,6 +164,25 @@ namespace MessengerHub
 ";
 
         /// <summary>
+        /// LinkedIn: prefer the messaging badge in the top nav (unread conversations); if that can't
+        /// be found, fall back to the count in the tab title (which also includes notifications).
+        /// </summary>
+        public const string LinkedInUnread = @"
+(() => {
+  try {
+    const a = document.querySelector('a[href*=\x22/messaging\x22]');
+    if (a) {
+      const b = a.querySelector('.notification-badge__count, [class*=notification-badge]');
+      if (b) { const v = parseInt((b.textContent || '').replace(/[^0-9]/g, ''), 10); if (!isNaN(v)) return v; }
+    }
+    const m = (document.title || '').match(/\((\d+)\+?\)/);
+    if (m) return parseInt(m[1], 10);
+    return 0;
+  } catch (e) { return -1; }
+})()
+";
+
+        /// <summary>
         /// Google Messages: count conversation rows marked unread. Its markup isn't documented, so
         /// this is best-effort (host 'unread' class or the data-e2e-is-unread marker); if neither is
         /// present it returns 0 rather than a wrong number.

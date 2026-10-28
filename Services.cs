@@ -101,7 +101,20 @@ namespace MessengerHub
             UnreadScript = Scripts.SlackUnread, // its tab title doesn't carry the unread count reliably
         };
 
-        public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, WeChat, GoogleMessages, Slack };
+        // LinkedIn: not a pure messenger, but it has DMs and you stay logged in across restarts
+        // (its own persistent, encrypted profile), so no more daily re-login.
+        public static readonly ServiceType LinkedIn = new ServiceType
+        {
+            Key = "linkedin",
+            Name = "LinkedIn",
+            Url = "https://www.linkedin.com/feed/",
+            Domains = new[] { "linkedin.com", "licdn.com" },
+            Color = Color.FromArgb(10, 102, 194),
+            Letter = "L",
+            UnreadScript = Scripts.LinkedInUnread,
+        };
+
+        public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, WeChat, GoogleMessages, Slack, LinkedIn };
 
         public static ServiceType ByKey(string key) =>
             All.FirstOrDefault(s => s.Key.Equals(key ?? "", StringComparison.OrdinalIgnoreCase)) ?? WhatsApp;

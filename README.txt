@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.13 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack)
+MESSENGER HUB  v0.14 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
 =============================================================
 
 INSTALL (easiest)
@@ -17,9 +17,9 @@ USING IT
   - Left sidebar: one round icon per account, showing the messenger's own site icon
     (the one on its browser tab). Hover an icon to see the account's name.
     Until the icon is saved the first time, a colored circle with a letter shows instead
-    (W=WhatsApp, T=Telegram, M=Messenger, C=WeChat, G=Google Messages, S=Slack).
+    (W=WhatsApp, T=Telegram, M=Messenger, C=WeChat, G=Google Messages, S=Slack, L=LinkedIn).
   - Drag an icon up or down to change the order.
-  - Click "+" and choose WhatsApp, Telegram, Messenger, WeChat, Google Messages or Slack to add an account.
+  - Click "+" and choose WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack or LinkedIn to add an account.
     After you log in, it is named automatically: phone number for WhatsApp and
     Telegram, profile name for Messenger. Names you choose yourself are never changed.
     Adding the same account twice is blocked: if a newly added WhatsApp/Telegram/Messenger

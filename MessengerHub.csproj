@@ -13,7 +13,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
-    <Version>0.15.0</Version>
+    <Version>0.16.0</Version>
     <Product>Messenger Hub</Product>
   </PropertyGroup>
 

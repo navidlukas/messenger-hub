@@ -60,6 +60,7 @@ namespace MessengerHub
             AllowPopups = true,
             IconPage = "/messages", // the Facebook login page shows the Facebook icon instead
             IdentityScript = Scripts.FacebookName,
+            AlwaysClearCache = true, // loads the full Facebook site (feed/reels/ads): a browsing tile
         };
 
         // WeChat Web works by QR scan, but only for accounts Tencent allows — some accounts get

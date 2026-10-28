@@ -32,6 +32,9 @@ USING IT
     individual one on/off from its own notification settings or the gear on its pop-up.
   - Menu > Silent (also on the tray right-click) mutes ALL accounts at once; turn it off
     to restore each account's own setting. It mutes sound only; the red dot still shows. The tray icon shows a crescent-moon badge while on.
+  - While an account is still loading, its icon spins and a "Loading..." screen covers its
+    page so you can't click a half-loaded page; it clears by itself once the page is ready.
+  - Open menus close automatically when you click into a page.
   - Downloads: you are asked where to save each file.
   - Ad/tracker blocking is always on: every account uses the browser engine's built-in
     tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).

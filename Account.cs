@@ -26,6 +26,8 @@ namespace MessengerHub
         public bool FirstLoadOk;                     // a top-level navigation has succeeded at least once
         public int StartupReloads;                   // auto-reloads used by the startup stuck-load watchdog
         public DateTime LastRecoverUtc = DateTime.MinValue; // last crash-recovery reload (rate limit)
+        public bool Ready;                           // page has loaded to a usable state (clears the loading overlay)
+        public DateTime LoadStartedUtc = DateTime.UtcNow; // when loading began (for the readiness timeout)
 
         public string TooltipText()
         {
@@ -62,6 +64,8 @@ namespace MessengerHub
         public int Unread;
         public Color Accent = Color.FromArgb(37, 211, 102);
         public Image SiteIcon;   // the messenger's favicon; null = colored letter circle
+        public bool Loading;     // draw a spinner on the icon while the page loads
+        public float SpinAngle;  // spinner rotation, advanced by the owner's animation timer
 
         private bool hover;
 
@@ -163,6 +167,19 @@ namespace MessengerHub
                         g.DrawString(Label, font, Brushes.White, circle, center);
                 }
 
+                // Loading spinner over the icon while the page is still loading.
+                if (Loading)
+                {
+                    float pad = 3 * s;
+                    var ring = new RectangleF(circle.X - pad, circle.Y - pad, circle.Width + 2 * pad, circle.Height + 2 * pad);
+                    using (var track = new Pen(Color.FromArgb(70, 0, 0, 0), 2.5f * s))
+                    using (var arc = new Pen(Color.FromArgb(235, 255, 255, 255), 2.5f * s) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    {
+                        g.DrawEllipse(track, ring);
+                        g.DrawArc(arc, ring, SpinAngle, 90);
+                    }
+                }
+
                 // Service letter badge (bottom-right): W / T / M — only in the fallback look.
                 if (SiteIcon == null && !string.IsNullOrEmpty(Letter))
                 {
@@ -242,6 +259,42 @@ namespace MessengerHub
             p.AddArc(r.Right - dia, r.Top, dia, dia, 270, 180);
             p.CloseFigure();
             return p;
+        }
+    }
+
+    /// <summary>
+    /// Covers the content area with a spinner while the active account is still loading. Shown in place
+    /// of the (hidden) web view, so the half-loaded page can't be seen or clicked until it's ready.
+    /// </summary>
+    internal sealed class LoadingOverlay : Control
+    {
+        public float Angle;
+
+        public LoadingOverlay()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            TabStop = false;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(BackColor)) g.FillRectangle(bg, ClientRectangle);
+
+            float d = 54f, cx = Width / 2f, cy = Height / 2f;
+            var rect = new RectangleF(cx - d / 2, cy - d / 2, d, d);
+            using (var track = new Pen(Color.FromArgb(40, 255, 255, 255), 5f))
+            using (var arc = new Pen(Color.FromArgb(210, 255, 255, 255), 5f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                g.DrawEllipse(track, rect);
+                g.DrawArc(arc, rect, Angle, 100);
+            }
+            using (var f = new Font("Segoe UI", 11f))
+            using (var br = new SolidBrush(Color.FromArgb(200, 255, 255, 255)))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center })
+                g.DrawString("Loading…", f, br, new RectangleF(0, cy + d / 2 + 10, Width, 24), sf);
         }
     }
 }

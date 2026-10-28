@@ -26,8 +26,6 @@ USING IT
     logs in as one you already have, the duplicate is removed automatically.
   - Right-click an icon for:
       Silent (no sound)       - the account makes no sound while in the background
-      Block ADs               - blocks trackers and ad-network domains for this account
-                                (built-in tracking prevention; not in-feed sponsored posts)
       Rename / Reload / Remove
     The same options are in the top menu under "Account" (for the selected account).
   - Notifications are handled by each messenger itself (native pop-ups with preview); turn an
@@ -35,6 +33,8 @@ USING IT
   - Menu > Silent (also on the tray right-click) mutes ALL accounts at once; turn it off
     to restore each account's own setting. It mutes sound only; the red dot still shows. The tray icon shows a crescent-moon badge while on.
   - Downloads: you are asked where to save each file.
+  - Ad/tracker blocking is always on: every account uses the browser engine's built-in
+    tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).
   - The tray icon shows a red dot (top-right) whenever any account has an unread message.
   - The X button hides the app to the system tray. Tray icon > right-click > Exit to quit.
   - Saving RAM/CPU: background accounts use low-memory mode, refresh themselves every

@@ -16,7 +16,6 @@ namespace MessengerHub
         public string Name;
         public ServiceType Service;
         public bool Silent;             // no sound while in the background
-        public bool BlockAds;           // per-profile tracking prevention (Strict) for trackers/ad networks
         public string Identity;         // the logged-in number/name (for duplicate detection); set once after login
         public bool IsNew;              // added this session and not yet checked for being a duplicate
         public bool NeedsCalibration;   // true until its cache limit has been measured this install

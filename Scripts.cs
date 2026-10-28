@@ -138,14 +138,27 @@ namespace MessengerHub
 ";
 
         /// <summary>
-        /// Slack doesn't put the count in the tab title either. Count the unread (non-muted)
-        /// conversations in the sidebar. Same selector other messenger wrappers use.
+        /// Slack unread count. The redesigned Slack keeps DMs/mentions in a part of the sidebar the
+        /// old selector didn't cover, so read the tab title first: Slack shows a count in parentheses
+        /// for DMs/mentions, e.g. '(3) Slack', and a leading * or bullet for other unread channels.
+        /// The title updates even while the tab is in the background. Falls back to the sidebar DOM.
         /// </summary>
         public const string SlackUnread = @"
 (() => {
   try {
-    const sel = '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted)';
-    return document.querySelectorAll(sel).length;
+    const t = document.title || '';
+    const m = t.match(/\((\d+)\+?\)/);
+    if (m) return parseInt(m[1], 10);          // mentions / DMs count
+    if (/^\s*[\*•]/.test(t)) return 1;         // other unread channels (no number)
+    const sels = [
+      '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted)',
+      '.p-channel_sidebar__badge',
+      '[data-qa-unread=true]'
+    ];
+    for (let i = 0; i < sels.length; i++) {
+      try { const n = document.querySelectorAll(sels[i]).length; if (n > 0) return n; } catch (e) {}
+    }
+    return 0;
   } catch (e) { return -1; }
 })()
 ";

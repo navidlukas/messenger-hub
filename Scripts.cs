@@ -108,8 +108,9 @@ namespace MessengerHub
         public const string TelegramUnread = @"
 (() => {
   try {
-    const sel = '.chat-list .ListItem.private .ChatBadge.unread:not(.muted), .chat-list .ListItem.group .ChatBadge.unread:not(.muted)';
-    const els = document.querySelectorAll(sel);
+    // Count unread (non-muted) badges on ANY chat type - private, group and channel.
+    // (Restricting to .private/.group missed channels like a company announcement chat.)
+    const els = document.querySelectorAll('.chat-list .ChatBadge.unread:not(.muted)');
     let n = 0;
     for (const el of els) {
       const v = parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10);

@@ -361,6 +361,7 @@ namespace MessengerHub
                 var service = ServiceType.ByKey(settings.Get("Type." + id, ServiceType.WhatsApp.Key));
                 var acc = CreateAccount(id, service, settings.Get("Name." + id) ?? NextName(service));
                 acc.Silent = settings.Get("Silent." + id) == "1";
+                acc.BlockAds = settings.Get("BlockAds." + id) == "1";
                 acc.Identity = settings.Get("Id." + id); // known identity, for duplicate detection
                 // Apply a previously measured cache limit, or mark for calibration (keeps the service default meanwhile).
                 if (int.TryParse(settings.Get("CacheLimit." + id), out int limMb))
@@ -546,6 +547,10 @@ namespace MessengerHub
             var silent = new ToolStripMenuItem("&Silent (no sound)") { Checked = acc.Silent };
             silent.Click += (s, e) => SetSilent(acc, !acc.Silent);
 
+            var blockAds = new ToolStripMenuItem("&Block ADs") { Checked = acc.BlockAds };
+            blockAds.ToolTipText = "Blocks trackers and ad-network domains for this account (not in-feed sponsored posts).";
+            blockAds.Click += (s, e) => SetBlockAds(acc, !acc.BlockAds);
+
             var rename = new ToolStripMenuItem("&Rename...");
             rename.Click += (s, e) => RenameAccount(acc);
 
@@ -557,7 +562,7 @@ namespace MessengerHub
 
             return new ToolStripItem[]
             {
-                silent, new ToolStripSeparator(),
+                silent, blockAds, new ToolStripSeparator(),
                 rename, reload, new ToolStripSeparator(),
                 remove,
             };
@@ -848,6 +853,7 @@ namespace MessengerHub
                 var core = acc.View.CoreWebView2;
                 try { security?.AddBrowserPid((int)core.BrowserProcessId); } catch { } // so we can wait for it on exit
                 ConfigureCore(core, acc);
+                ApplyBlockAds(acc); // per-account tracking prevention, before the first navigation
 
                 core.DocumentTitleChanged += (s, e) => UpdateUnread(acc, core.DocumentTitle);
                 core.NewWindowRequested += (s, e) => OnNewWindowRequested(acc, e);
@@ -1062,6 +1068,31 @@ namespace MessengerHub
             SaveSettings();
         }
 
+        /// <summary>
+        /// Per-account ad/tracker blocking via WebView2's built-in tracking prevention (Strict when on,
+        /// None when off). Blocks third-party trackers and ad-network domains, not first-party in-feed ads.
+        /// </summary>
+        private void SetBlockAds(Account acc, bool on)
+        {
+            acc.BlockAds = on;
+            ApplyBlockAds(acc);
+            SaveSettings();
+            try { acc.View.CoreWebView2?.Reload(); } catch { } // apply to the current page
+        }
+
+        private static void ApplyBlockAds(Account acc)
+        {
+            var profile = acc.View.CoreWebView2?.Profile;
+            if (profile == null) return;
+            try
+            {
+                profile.PreferredTrackingPreventionLevel = acc.BlockAds
+                    ? CoreWebView2TrackingPreventionLevel.Strict
+                    : CoreWebView2TrackingPreventionLevel.None;
+            }
+            catch { /* older WebView2 runtime without this API */ }
+        }
+
         private async Task RemoveAccountAsync(Account acc)
         {
             var answer = MessageBox.Show(this,
@@ -1083,6 +1114,7 @@ namespace MessengerHub
                 settings.Set("Name." + a.Id, a.Name);
                 settings.Set("Type." + a.Id, a.Service.Key);
                 settings.Set("Silent." + a.Id, a.Silent ? "1" : "0");
+                settings.Set("BlockAds." + a.Id, a.BlockAds ? "1" : "0");
                 if (!string.IsNullOrEmpty(a.Identity)) settings.Set("Id." + a.Id, a.Identity);
             }
             settings.Save(AppPaths.SettingsFile);

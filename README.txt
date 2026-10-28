@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.18 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
+MESSENGER HUB  v0.19 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
 =============================================================
 
 INSTALL (easiest)

@@ -43,6 +43,8 @@ USING IT
     warm-up and sets that account's limit to about twice that size (never below 300 MB). On
     exit, an account over its limit has its media cache cleared (app files and logins are kept).
     It re-measures after a manual Clear cache. Nothing to configure.
+    (Full-website tiles like LinkedIn always clear their media cache on exit, since they
+    are used occasionally and their cache grows fast; logins are still kept.)
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
 

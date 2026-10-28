@@ -126,6 +126,21 @@ namespace MessengerHub
             lock (cacheLimits) cacheLimits[profileId] = megabytes * 1024L * 1024L;
         }
 
+        // Accounts whose media cache is cleared on EVERY exit, regardless of size (full-website tiles).
+        private readonly HashSet<string> alwaysClear = new HashSet<string>();
+
+        public void SetAlwaysClear(string profileId, bool on)
+        {
+            lock (cacheLimits) { if (on) alwaysClear.Add(profileId); else alwaysClear.Remove(profileId); }
+        }
+
+        private bool IsAlwaysClear(string profileFolderName)
+        {
+            const string prefix = "WV2Profile_";
+            string id = profileFolderName.StartsWith(prefix) ? profileFolderName.Substring(prefix.Length) : profileFolderName;
+            lock (cacheLimits) return alwaysClear.Contains(id);
+        }
+
         /// <summary>Current media-cache size (bytes) for one account's profile — used to calibrate its limit.</summary>
         public long MeasureProfileCache(string profileId)
         {
@@ -153,10 +168,13 @@ namespace MessengerHub
         {
             Parallel.ForEach(ProfileDirs().ToList(), profile =>
             {
-                long limit = CacheLimitFor(Path.GetFileName(profile));
+                string name = Path.GetFileName(profile);
+                bool clearAll = IsAlwaysClear(name);
+                long limit = CacheLimitFor(name);
                 long total = 0;
                 foreach (var c in CacheFolders) total += DirSize(Path.Combine(profile, c));
-                if (total <= limit) return;
+                if (total == 0) return;                 // nothing to clear
+                if (!clearAll && total <= limit) return; // within its calibrated limit
                 foreach (var c in CacheFolders) TryDeleteDir(Path.Combine(profile, c));
             });
         }

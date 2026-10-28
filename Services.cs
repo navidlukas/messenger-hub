@@ -22,6 +22,7 @@ namespace MessengerHub
         public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
         public string ReadyScript;    // returns 'true' when the page is usable; null = fall back to a text check
         public int CacheLimitMB = 300; // clear this account's media cache on exit once it passes this size
+        public bool AlwaysClearCache; // full-website tiles: clear the media cache on every exit (no calibration)
 
         public static readonly ServiceType WhatsApp = new ServiceType
         {
@@ -112,6 +113,7 @@ namespace MessengerHub
             Color = Color.FromArgb(10, 102, 194),
             Letter = "L",
             UnreadScript = Scripts.LinkedInUnread,
+            AlwaysClearCache = true, // heavy full site, used occasionally: don't let its media cache linger
         };
 
         public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, WeChat, GoogleMessages, Slack, LinkedIn };

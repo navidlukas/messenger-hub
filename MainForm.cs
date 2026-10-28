@@ -536,6 +536,7 @@ namespace MessengerHub
             accountList.Controls.SetChildIndex(addButton, accountList.Controls.Count - 1);
 
             security?.SetCacheLimit(acc.Id, acc.Service.CacheLimitMB); // so the exit cache-trim knows this account's limit
+            security?.SetAlwaysClear(acc.Id, acc.Service.AlwaysClearCache); // full-site tiles clear cache every exit
             accounts.Add(acc);
             RefreshButton(acc);
             return acc;
@@ -959,6 +960,7 @@ namespace MessengerHub
             if (security == null) return;
             foreach (var acc in accounts)
             {
+                if (acc.Service.AlwaysClearCache) continue; // these clear every exit; no limit to calibrate
                 if (!acc.NeedsCalibration || acc.View.IsDisposed || acc.View.CoreWebView2 == null) continue;
                 if ((DateTime.UtcNow - acc.LoadedAt).TotalSeconds < 120) continue; // let it warm up first
 

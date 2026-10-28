@@ -71,13 +71,6 @@ namespace MessengerHub
         // read it from the page every few seconds instead.
         private readonly System.Windows.Forms.Timer unreadTimer = new System.Windows.Forms.Timer { Interval = 4000 };
 
-        // Loading overlay: while the active account isn't ready, show a spinner instead of its page.
-        private readonly LoadingOverlay loadingOverlay = new LoadingOverlay();
-        private readonly System.Windows.Forms.Timer spinTimer = new System.Windows.Forms.Timer { Interval = 80 };   // spinner animation
-        private readonly System.Windows.Forms.Timer readyTimer = new System.Windows.Forms.Timer { Interval = 1000 }; // readiness checks
-        private float spinAngle;
-        private bool readyBusy;
-
         // Drag-to-reorder state.
         private readonly Panel dropIndicator = new Panel();
         private Account dragAcc;
@@ -122,8 +115,6 @@ namespace MessengerHub
                 refreshTimer.Dispose();
                 identityTimer.Dispose();
                 unreadTimer.Dispose();
-                spinTimer.Dispose();
-                readyTimer.Dispose();
                 startupWatchdog?.Dispose();
                 tray.Dispose();
                 foreach (var ic in trayIcons) ic?.Dispose();
@@ -137,10 +128,6 @@ namespace MessengerHub
 
             unreadTimer.Tick += async (s, e) => await UnreadPollAsync();
             unreadTimer.Start();
-
-            spinTimer.Tick += (s, e) => AnimateLoading();
-            readyTimer.Tick += async (s, e) => await ReadyTick();
-            readyTimer.Start();
 
             // Hidden in tray or minimized -> all accounts go to background mode.
             VisibleChanged += (s, e) => ApplyBackgroundState();
@@ -284,11 +271,6 @@ namespace MessengerHub
             emptyLabel.Text = "No accounts yet.\nClick + on the left to add WhatsApp, Telegram or Messenger.";
             emptyLabel.Visible = false;
             content.Controls.Add(emptyLabel);
-
-            loadingOverlay.Dock = DockStyle.Fill;
-            loadingOverlay.BackColor = ContentColor;
-            loadingOverlay.Visible = false;
-            content.Controls.Add(loadingOverlay);
         }
 
         private void BuildTray()
@@ -493,66 +475,6 @@ namespace MessengerHub
             catch { return true; } // unknown: assume ok, don't reload
         }
 
-        // ------------------------------------------------------------------ Loading overlay
-
-        /// <summary>Every second, mark accounts ready once their page is usable, clearing the spinner/overlay.</summary>
-        private async Task ReadyTick()
-        {
-            if (readyBusy) return;
-            readyBusy = true;
-            try
-            {
-                bool anyLoading = false;
-                foreach (var acc in accounts.ToList())
-                {
-                    if (acc.Ready) continue;
-                    if (acc.View.IsDisposed) { acc.Ready = true; continue; }
-
-                    bool ready = acc.View.CoreWebView2 != null && await IsReady(acc);
-                    // Safety net: never leave an account stuck behind the overlay.
-                    if (!ready && (DateTime.UtcNow - acc.LoadStartedUtc).TotalSeconds > 60) ready = true;
-
-                    if (ready)
-                    {
-                        acc.Ready = true;
-                        acc.Button.Loading = false;
-                        acc.Button.Invalidate();
-                        if (acc == active) UpdateActiveView();
-                    }
-                    else anyLoading = true;
-                }
-
-                if (anyLoading && !spinTimer.Enabled) spinTimer.Start();
-                else if (!anyLoading && spinTimer.Enabled) spinTimer.Stop();
-            }
-            finally { readyBusy = false; }
-        }
-
-        /// <summary>Advances the spinner and repaints the overlay and any loading icons.</summary>
-        private void AnimateLoading()
-        {
-            spinAngle = (spinAngle + 22f) % 360f;
-            loadingOverlay.Angle = spinAngle;
-            if (loadingOverlay.Visible) loadingOverlay.Invalidate();
-            foreach (var a in accounts)
-                if (a.Button.Loading) { a.Button.SpinAngle = spinAngle; a.Button.Invalidate(); }
-        }
-
-        /// <summary>
-        /// Close any open top menu or right-click menu. Called when a page is clicked, because a WebView2
-        /// runs out-of-process and WinForms doesn't dismiss its menus for clicks that land inside it.
-        /// </summary>
-        private void CloseOpenMenus()
-        {
-            try
-            {
-                foreach (ToolStripItem it in menu.Items) (it as ToolStripMenuItem)?.HideDropDown();
-                addMenu?.Close();
-                foreach (var a in accounts) a.Button.ContextMenuStrip?.Close();
-            }
-            catch { }
-        }
-
         /// <summary>Menu &gt; Check for updates: check now and, if one is ready, offer to restart and apply it.</summary>
         private async Task CheckForUpdatesAsync()
         {
@@ -611,9 +533,6 @@ namespace MessengerHub
                 Visible = false,
             };
             content.Controls.Add(acc.View);
-            // Clicking into a page should close any open top/right-click menu (WebView2 is out-of-process,
-            // so WinForms doesn't auto-close them on its own).
-            acc.View.GotFocus += (s, e) => CloseOpenMenus();
 
             acc.Button = new AccountButton
             {
@@ -622,7 +541,6 @@ namespace MessengerHub
                 BackColor = SidebarColor,
                 Accent = service.Color,
                 Letter = service.Letter,
-                Loading = true, // spins until the page is ready
             };
             acc.Button.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left && !dragging) SelectAccount(acc); };
 
@@ -1087,40 +1005,20 @@ namespace MessengerHub
             active = acc;
             foreach (var a in accounts)
             {
+                a.View.Visible = a == acc;
                 a.Button.Active = a == acc;
                 a.Button.Invalidate();
             }
-            UpdateActiveView();
+            emptyLabel.Visible = acc == null;
             ApplyBackgroundState();
 
             if (acc != null)
             {
+                acc.View.BringToFront();
                 settings.Set("ActiveAccount", acc.Id);
-                if (acc.Ready) { try { acc.View.Focus(); } catch { } }
+                try { acc.View.Focus(); } catch { }
             }
             UpdateTitle();
-        }
-
-        /// <summary>
-        /// Shows the active account's page only once it's ready; until then its web view stays hidden and
-        /// the loading overlay is shown in its place (so a half-loaded page can't be seen or clicked).
-        /// </summary>
-        private void UpdateActiveView()
-        {
-            bool showOverlay = active != null && !active.Ready;
-            foreach (var a in accounts) a.View.Visible = (a == active) && a.Ready;
-            emptyLabel.Visible = active == null;
-
-            loadingOverlay.Visible = showOverlay;
-            if (showOverlay)
-            {
-                loadingOverlay.BringToFront();
-                if (!spinTimer.Enabled) spinTimer.Start();
-            }
-            else if (active != null)
-            {
-                active.View.BringToFront();
-            }
         }
 
         private async Task AddAccountAsync(ServiceType service)

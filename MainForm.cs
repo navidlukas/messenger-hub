@@ -728,8 +728,6 @@ namespace MessengerHub
                     AdditionalBrowserArguments = "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
                                                  "--enable-features=SubframeShutdownDelay " +
                                                  "--disable-background-timer-throttling " +
-                                                 "--disable-backgrounding-occluded-windows " +
-                                                 "--disable-renderer-backgrounding " +
                                                  "--disable-sync " +
                                                  "--disable-component-update " +
                                                  "--disable-domain-reliability " +

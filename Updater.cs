@@ -233,8 +233,8 @@ namespace MessengerHub
                 {
                     resp.EnsureSuccessStatusCode();
                     using (var s = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
-                    using (var fs = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None))
-                        s.CopyTo(fs);
+                    using (var fs = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None, 81920))
+                        s.CopyTo(fs, 81920);
                 }
                 return new FileInfo(dest).Length > 0;
             }

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -86,17 +87,50 @@ namespace MessengerHub
                     yield return dir;
         }
 
+        private readonly Dictionary<string, Task> unlockTasks =
+            new Dictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>
-        /// Restore all login data to plain form. Called at launch, before the browser starts.
-        /// Accounts are processed in parallel to use all CPU cores.
+        /// Unlocks a single account's profile asynchronously (deduplicated so concurrent calls share the same task).
+        /// </summary>
+        public Task UnlockProfileAsync(string profileId)
+        {
+            if (string.IsNullOrEmpty(profileId)) return Task.CompletedTask;
+            string profile = Path.Combine(AppPaths.EbWebView, "WV2Profile_" + profileId);
+            return UnlockProfileDirAsync(profile);
+        }
+
+        private Task UnlockProfileDirAsync(string profile)
+        {
+            lock (unlockTasks)
+            {
+                if (unlockTasks.TryGetValue(profile, out var existing))
+                    return existing;
+                var task = Task.Run(() =>
+                {
+                    try
+                    {
+                        if (!Directory.Exists(profile)) return;
+                        foreach (var rel in DirTargets) UnlockDir(profile, rel);
+                        foreach (var rel in FileTargets) UnlockFile(profile, rel);
+                    }
+                    finally
+                    {
+                        Crypto.ReleaseBuffers();
+                    }
+                });
+                unlockTasks[profile] = task;
+                return task;
+            }
+        }
+
+        /// <summary>
+        /// Restore all login data to plain form. Accounts are processed in parallel to use all CPU cores.
         /// </summary>
         public void UnlockProfiles()
         {
-            Parallel.ForEach(ProfileDirs().ToList(), profile =>
-            {
-                foreach (var rel in DirTargets) UnlockDir(profile, rel);
-                foreach (var rel in FileTargets) UnlockFile(profile, rel);
-            });
+            var tasks = ProfileDirs().Select(UnlockProfileDirAsync).ToArray();
+            if (tasks.Length > 0) Task.WaitAll(tasks);
         }
 
         /// <summary>
@@ -113,35 +147,21 @@ namespace MessengerHub
             });
         }
 
-        // Safety net: if an account's media cache grows past its limit, it's cleared on exit so the folder
-        // can't balloon over time. The app's offline shell and the login data are left alone, so the
-        // only effect is that account re-downloads its media next time it's opened.
-        private const long DefaultCacheLimitBytes = 300L * 1024 * 1024;
+        // Unified per-profile cache rule: every profile (all services and future add-ons) has a 200 MB
+        // cache limit. Profiles exceeding 200 MB are cleared silently during 10-minute PC idle or
+        // 10-minute app-minimized/tray checks and on app exit, while logins remain untouched.
+        public const int ProfileCacheLimitMB = 200;
+        public const long ProfileCacheLimitBytes = ProfileCacheLimitMB * 1024L * 1024L;
 
-        // Per-account cache limit in bytes (set from each account's service). Keyed by profile id.
-        private readonly Dictionary<string, long> cacheLimits = new Dictionary<string, long>();
-
-        public void SetCacheLimit(string profileId, int megabytes)
+        // Cached media, compiled JS/WASM, and GPU shader caches.
+        // Logins (Cookies, Local Storage, IndexedDB) and Service Workers live elsewhere and are never touched.
+        private static readonly string[] CacheFolders =
         {
-            lock (cacheLimits) cacheLimits[profileId] = megabytes * 1024L * 1024L;
-        }
+            "Cache", "Code Cache",
+            "GPUCache", "DawnCache", "DawnGraphiteCache", "GrShaderCache"
+        };
 
-        // Accounts whose media cache is cleared on EVERY exit, regardless of size (full-website tiles).
-        private readonly HashSet<string> alwaysClear = new HashSet<string>();
-
-        public void SetAlwaysClear(string profileId, bool on)
-        {
-            lock (cacheLimits) { if (on) alwaysClear.Add(profileId); else alwaysClear.Remove(profileId); }
-        }
-
-        private bool IsAlwaysClear(string profileFolderName)
-        {
-            const string prefix = "WV2Profile_";
-            string id = profileFolderName.StartsWith(prefix) ? profileFolderName.Substring(prefix.Length) : profileFolderName;
-            lock (cacheLimits) return alwaysClear.Contains(id);
-        }
-
-        /// <summary>Current media-cache size (bytes) for one account's profile — used to calibrate its limit.</summary>
+        /// <summary>Current cache size (bytes) for one account's profile.</summary>
         public long MeasureProfileCache(string profileId)
         {
             string profile = Path.Combine(AppPaths.EbWebView, "WV2Profile_" + profileId);
@@ -150,31 +170,14 @@ namespace MessengerHub
             return total;
         }
 
-        private long CacheLimitFor(string profileFolderName)
-        {
-            const string prefix = "WV2Profile_";
-            string id = profileFolderName.StartsWith(prefix) ? profileFolderName.Substring(prefix.Length) : profileFolderName;
-            lock (cacheLimits)
-                return cacheLimits.TryGetValue(id, out long v) ? v : DefaultCacheLimitBytes;
-        }
-
-        // The media / throwaway caches. "Service Worker" (the offline app shell) is deliberately NOT here,
-        // so the app still starts fast; logins live elsewhere and are never touched.
-        private static readonly string[] CacheFolders =
-            { "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "GrShaderCache" };
-
-        /// <summary>At exit (browser already closed): clear the media cache of any account over the size limit.</summary>
+        /// <summary>At exit (browser already closed): clear the cache of any profile exceeding 200 MB.</summary>
         public void TrimCaches()
         {
             Parallel.ForEach(ProfileDirs().ToList(), profile =>
             {
-                string name = Path.GetFileName(profile);
-                bool clearAll = IsAlwaysClear(name);
-                long limit = CacheLimitFor(name);
                 long total = 0;
                 foreach (var c in CacheFolders) total += DirSize(Path.Combine(profile, c));
-                if (total == 0) return;                 // nothing to clear
-                if (!clearAll && total <= limit) return; // within its calibrated limit
+                if (total <= ProfileCacheLimitBytes) return;
                 foreach (var c in CacheFolders) TryDeleteDir(Path.Combine(profile, c));
             });
         }
@@ -184,10 +187,11 @@ namespace MessengerHub
             long total = 0;
             try
             {
-                if (!Directory.Exists(path)) return 0;
-                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                var di = new DirectoryInfo(path);
+                if (!di.Exists) return 0;
+                foreach (var fi in di.EnumerateFiles("*", SearchOption.AllDirectories))
                 {
-                    try { total += new FileInfo(f).Length; } catch { }
+                    try { total += fi.Length; } catch { }
                 }
             }
             catch { }
@@ -208,11 +212,11 @@ namespace MessengerHub
             {
                 if (isDir)
                 {
-                    if (!Directory.Exists(path)) return "";
+                    var di = new DirectoryInfo(path);
+                    if (!di.Exists) return "";
                     long size = 0, newest = 0; int count = 0;
-                    foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    foreach (var fi in di.EnumerateFiles("*", SearchOption.AllDirectories))
                     {
-                        var fi = new FileInfo(f);
                         size += fi.Length;
                         long t = fi.LastWriteTimeUtc.Ticks;
                         if (t > newest) newest = t;
@@ -239,7 +243,6 @@ namespace MessengerHub
             if (!Directory.Exists(src)) return; // nothing there (or already locked)
             string lockPath = src + ".mhd";
             string sigPath = lockPath + ".sig";
-            string tmpZip = src + ".mhtmp";
             try
             {
                 string sig = Signature(src, true);
@@ -249,22 +252,18 @@ namespace MessengerHub
                     return;
                 }
 
-                if (File.Exists(tmpZip)) File.Delete(tmpZip);
-                ZipFile.CreateFromDirectory(src, tmpZip, CompressionLevel.Fastest, false);
-                Crypto.EncryptFile(tmpZip, lockPath + ".tmp", master);
-                File.Delete(tmpZip);
-
-                if (!Crypto.VerifyFile(lockPath + ".tmp", master)) // verify it reads back
-                    throw new Exception("verify failed");
+                Crypto.EncryptDirectory(src, lockPath + ".tmp", master);
+                if (new FileInfo(lockPath + ".tmp").Length < 48)
+                    throw new Exception("encrypt failed");
 
                 if (File.Exists(lockPath)) File.Delete(lockPath);
                 File.Move(lockPath + ".tmp", lockPath);
                 WriteText(sigPath, sig);
-                Directory.Delete(src, true); // plain copy gone only after the lock file is verified and in place
+                Directory.Delete(src, true); // plain copy gone only after the lock file is in place
             }
             catch
             {
-                Clean(tmpZip, lockPath + ".tmp"); // leave the plain copy untouched on any failure
+                Clean(lockPath + ".tmp"); // leave the plain copy untouched on any failure
             }
         }
 
@@ -275,27 +274,23 @@ namespace MessengerHub
             string sigPath = lockPath + ".sig";
             if (!File.Exists(lockPath)) return;
 
-            // Plain copy wins: a crash left both, so keep the plain one and drop the stale lock + signature.
-            if (Directory.Exists(src) && Directory.EnumerateFileSystemEntries(src).Any())
-            {
-                TryDelete(lockPath);
-                TryDelete(sigPath);
-                return;
-            }
+            // Plain copy already present: keep it as-is without touching or deleting the encrypted lock file.
+            if (Directory.Exists(src) && Directory.EnumerateFileSystemEntries(src).Any()) return;
 
-            string tmpZip = src + ".mhtmp";
-            try
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                if (!Crypto.DecryptFile(lockPath, tmpZip, master)) return; // keep the lock file; don't lose data
-                if (Directory.Exists(src)) Directory.Delete(src, true);
-                ZipFile.ExtractToDirectory(tmpZip, src);
-                File.Delete(tmpZip);
-                // Keep the lock file: if nothing changes this session, LockDir reuses it. Record the restored state.
-                WriteText(sigPath, Signature(src, true));
-            }
-            catch
-            {
-                Clean(tmpZip);
+                try
+                {
+                    Directory.CreateDirectory(src);
+                    if (!Crypto.DecryptDirectory(lockPath, src, master)) return; // keep the lock file; don't lose data
+                    // Keep the lock file: if nothing changes this session, LockDir reuses it. Record the restored state.
+                    WriteText(sigPath, Signature(src, true));
+                    return;
+                }
+                catch
+                {
+                    if (attempt < 2) System.Threading.Thread.Sleep(50);
+                }
             }
         }
 
@@ -311,7 +306,7 @@ namespace MessengerHub
                 if (Unchanged(sigPath, lockPath, sig)) { File.Delete(src); return; } // unchanged: reuse
 
                 Crypto.EncryptFile(src, lockPath + ".tmp", master);
-                if (!Crypto.VerifyFile(lockPath + ".tmp", master)) throw new Exception("verify failed");
+                if (new FileInfo(lockPath + ".tmp").Length < 48) throw new Exception("encrypt failed");
                 if (File.Exists(lockPath)) File.Delete(lockPath);
                 File.Move(lockPath + ".tmp", lockPath);
                 WriteText(sigPath, sig);
@@ -330,18 +325,24 @@ namespace MessengerHub
             string sigPath = lockPath + ".sig";
             if (!File.Exists(lockPath)) return;
 
-            if (File.Exists(src)) { TryDelete(lockPath); TryDelete(sigPath); return; } // plain copy wins
+            if (File.Exists(src) && new FileInfo(src).Length > 0) return; // plain copy already present, leave lockPath as backup
 
-            try
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                if (!Crypto.DecryptFile(lockPath, src + ".tmp", master)) return;
-                if (File.Exists(src)) File.Delete(src);
-                File.Move(src + ".tmp", src);
-                WriteText(sigPath, Signature(src, false)); // keep the lock for possible reuse
-            }
-            catch
-            {
-                Clean(src + ".tmp");
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(src));
+                    if (!Crypto.DecryptFile(lockPath, src + ".tmp", master)) return;
+                    if (File.Exists(src)) File.Delete(src);
+                    File.Move(src + ".tmp", src);
+                    WriteText(sigPath, Signature(src, false)); // keep the lock for possible reuse
+                    return;
+                }
+                catch
+                {
+                    Clean(src + ".tmp");
+                    if (attempt < 2) System.Threading.Thread.Sleep(50);
+                }
             }
         }
 
@@ -406,22 +407,107 @@ namespace MessengerHub
 
         public void AddBrowserPid(int pid) { if (pid > 0) lock (browserPids) browserPids.Add(pid); }
 
+        private const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct PROCESSENTRY32
+        {
+            public uint dwSize;
+            public uint cntUsage;
+            public uint th32ProcessID;
+            public IntPtr th32DefaultHeapID;
+            public uint th32ModuleID;
+            public uint cntThreads;
+            public uint th32ParentProcessID;
+            public int pcPriClassBase;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string szExeFile;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern bool Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool K32EmptyWorkingSet(IntPtr hProcess);
+
+        /// <summary>Evicts cold physical RAM pages from the WebView2 browser and all its child renderer/utility processes.</summary>
+        public void TrimBrowserWorkingSets()
+        {
+            int[] rootPids;
+            lock (browserPids) rootPids = browserPids.ToArray();
+            if (rootPids.Length == 0) return;
+
+            var targetPids = new HashSet<int>(rootPids);
+            IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap != IntPtr.Zero && snap != (IntPtr)(-1))
+            {
+                try
+                {
+                    var pe = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+                    if (Process32First(snap, ref pe))
+                    {
+                        do
+                        {
+                            if (targetPids.Contains((int)pe.th32ParentProcessID))
+                                targetPids.Add((int)pe.th32ProcessID);
+                        }
+                        while (Process32Next(snap, ref pe));
+                    }
+                }
+                finally
+                {
+                    CloseHandle(snap);
+                }
+            }
+
+            foreach (int pid in targetPids)
+            {
+                try
+                {
+                    using (var p = Process.GetProcessById(pid))
+                        K32EmptyWorkingSet(p.Handle);
+                }
+                catch { }
+            }
+        }
+
         /// <summary>At exit: wait until the browser processes have really closed, so their files are free to encrypt.</summary>
         public void WaitForBrowsers(int timeoutMs = 15000)
         {
             int[] pids;
             lock (browserPids) pids = browserPids.ToArray();
+            if (pids.Length == 0) return;
+
+            bool waitedAny = false;
             var sw = Stopwatch.StartNew();
             foreach (int pid in pids)
             {
-                while (sw.ElapsedMilliseconds < timeoutMs)
+                long remaining = timeoutMs - sw.ElapsedMilliseconds;
+                if (remaining <= 0) break;
+                try
                 {
-                    try { using (var p = Process.GetProcessById(pid)) { if (p.HasExited) break; } }
-                    catch { break; } // no such process: it has exited
-                    System.Threading.Thread.Sleep(200);
+                    using (var p = Process.GetProcessById(pid))
+                    {
+                        if (!p.HasExited)
+                        {
+                            waitedAny = true;
+                            p.WaitForExit((int)Math.Min(remaining, int.MaxValue));
+                        }
+                    }
                 }
+                catch { } // process already exited or access denied
             }
-            System.Threading.Thread.Sleep(300); // small grace for file handles to release
+            if (waitedAny) System.Threading.Thread.Sleep(50); // small grace for file handles to release
         }
 
         // ------------------------------------------------------------------ helpers

@@ -12,6 +12,17 @@ namespace MessengerHub
         [STAThread]
         private static void Main(string[] args)
         {
+            // Multi-core JIT: pre-compile IL methods on background threads for faster startup.
+            try
+            {
+                if (Directory.Exists(AppPaths.Data))
+                {
+                    System.Runtime.ProfileOptimization.SetProfileRoot(AppPaths.Data);
+                    System.Runtime.ProfileOptimization.StartProfile("Startup.profile");
+                }
+            }
+            catch { }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -86,9 +97,9 @@ namespace MessengerHub
                         }
                     }
 
-                    // Unlocked: restore the login data to plain form before the browser touches it.
+                    // Unlocked: restore the portable cookie key; profiles are unlocked asynchronously
+                    // inside MainForm.StartAsync (active account first) so the window appears immediately.
                     security.RestoreCookieKey();
-                    security.UnlockProfiles();
 
                     Application.Run(new MainForm(showSignal, security));
 
@@ -153,10 +164,13 @@ namespace MessengerHub
             Directory.CreateDirectory(WebView);
             Directory.CreateDirectory(Icons);
 
-            // Test that we can really write here.
-            string probe = Path.Combine(Data, ".write-test");
-            File.WriteAllText(probe, "ok");
-            File.Delete(probe);
+            // Test that we can really write here on first run.
+            if (!File.Exists(SecurityFile) && !File.Exists(SettingsFile))
+            {
+                string probe = Path.Combine(Data, ".write-test");
+                File.WriteAllText(probe, "ok");
+                File.Delete(probe);
+            }
         }
     }
 }

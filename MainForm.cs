@@ -5,7 +5,6 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
-using System.Management;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Net.Http;
@@ -41,6 +40,9 @@ namespace MessengerHub
         // Four tray-icon variants: [unread dot?][silent moon?]. Rebuilt once, swapped as state changes.
         private readonly Icon[] trayIcons = new Icon[4];
         private int trayIconIndex = -1;
+        private ITaskbarList3 taskbarList;
+        private string lastTaskbarBadge = "";
+        private IntPtr taskbarBadgeHIcon = IntPtr.Zero;
         private bool globalSilent; // mute every account's sound at once (overrides per-account Silent)
         private ToolStripMenuItem silentMenuItem, silentTrayItem;
         private readonly ToolTip tips = new ToolTip();
@@ -51,8 +53,14 @@ namespace MessengerHub
         private bool reallyExit;
         private bool resetting;
         private bool wasMinimized;
-        private static readonly TimeSpan AutoRefreshAfter = TimeSpan.FromHours(3);
-        private readonly System.Windows.Forms.Timer refreshTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+        private readonly System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+        private const uint IdleCacheCheckMs = 10u * 60u * 1000u;
+        private const int IdlePollActiveMs = 30 * 1000;
+        private const int IdlePollWakeMs = 1000;
+        private readonly System.Windows.Forms.Timer idleMonitorTimer = new System.Windows.Forms.Timer { Interval = IdlePollActiveMs };
+        private bool isSystemIdle;
+        private DateTime? minimizedSinceUtc;
+        private DateTime lastIdleCacheCheckUtc = DateTime.MinValue;
         private readonly float scale;
 
         // Site icons (favicons) per messenger, saved in data\icons\<service>.png.
@@ -68,13 +76,11 @@ namespace MessengerHub
         private readonly System.Windows.Forms.Timer identityTimer = new System.Windows.Forms.Timer { Interval = 10 * 1000 };
         private readonly HashSet<Account> identityBusy = new HashSet<Account>();
 
-        // Unread polling: for services whose tab title doesn't carry the count (e.g. Telegram),
-        // read it from the page every few seconds instead.
-        private readonly System.Windows.Forms.Timer unreadTimer = new System.Windows.Forms.Timer { Interval = 4000 };
-
-        // Startup speed boost: run the app + its WebView2 processes at AboveNormal for the first minute.
-        private readonly System.Windows.Forms.Timer priorityTimer = new System.Windows.Forms.Timer { Interval = 5000 };
-        private DateTime boostUntilUtc;
+        // Unread fallback polling: real-time unread changes are pushed immediately via MutationObserver
+        // (WebMessageReceived); this slow fallback timer only reconciles state every 30-60s.
+        private const int UnreadForegroundInterval = 30000;
+        private const int UnreadBackgroundInterval = 60000;
+        private readonly System.Windows.Forms.Timer unreadTimer = new System.Windows.Forms.Timer { Interval = UnreadForegroundInterval };
 
         // Drag-to-reorder state.
         private readonly Panel dropIndicator = new Panel();
@@ -83,12 +89,168 @@ namespace MessengerHub
         private bool dragging;
         private int dropIndex = -1;
 
+        private readonly System.Windows.Forms.Timer saveDebounceTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        private System.Windows.Forms.Timer startupPriorityTimer;
+
         private RegisteredWaitHandle showSignalWait;
+
+        // ------------------------------------------------------------------ Mouse hook to close menus on click outside
+        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private const int WH_MOUSE_LL = 14;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int WM_NCRBUTTONDOWN = 0x00A4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int x; public int y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetTickCount();
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern uint RegisterWindowMessage(string lpString);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ChangeWindowMessageFilter(uint message, uint dwFlag);
+
+        private const uint MSGFLT_ADD = 1;
+        private static readonly uint WM_TASKBARBUTTONCREATED = RegisterWindowMessage("TaskbarButtonCreated");
+
+        [ComImport, Guid("EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface ITaskbarList3
+        {
+            [PreserveSig] int HrInit();
+            [PreserveSig] int AddTab(IntPtr hwnd);
+            [PreserveSig] int DeleteTab(IntPtr hwnd);
+            [PreserveSig] int ActivateTab(IntPtr hwnd);
+            [PreserveSig] int SetActiveAlt(IntPtr hwnd);
+            [PreserveSig] int MarkFullscreenWindow(IntPtr hwnd, [MarshalAs(UnmanagedType.Bool)] bool fFullscreen);
+            [PreserveSig] int SetProgressValue(IntPtr hwnd, ulong ullCompleted, ulong ullTotal);
+            [PreserveSig] int SetProgressState(IntPtr hwnd, int tbpFlags);
+            [PreserveSig] int RegisterTab(IntPtr hwndTab, IntPtr hwndMDI);
+            [PreserveSig] int UnregisterTab(IntPtr hwndTab);
+            [PreserveSig] int SetTabOrder(IntPtr hwndTab, IntPtr hwndInsertBefore);
+            [PreserveSig] int SetTabActive(IntPtr hwndTab, IntPtr hwndMDI, uint dwReserved);
+            [PreserveSig] int ThumbBarAddButtons(IntPtr hwnd, uint cButtons, IntPtr pButton);
+            [PreserveSig] int ThumbBarUpdateButtons(IntPtr hwnd, uint cButtons, IntPtr pButton);
+            [PreserveSig] int ThumbBarSetImageList(IntPtr hwnd, IntPtr himl);
+            [PreserveSig] int SetOverlayIcon(IntPtr hwnd, IntPtr hIcon, [MarshalAs(UnmanagedType.LPWStr)] string pszDescription);
+        }
+
+        [ComImport, Guid("56FDF344-FD6D-11D0-958A-006097C9A090"), ClassInterface(ClassInterfaceType.None)]
+        private class TaskbarListInstance { }
+
+        private static uint GetSystemIdleMilliseconds()
+        {
+            var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+            return GetLastInputInfo(ref info) ? unchecked(GetTickCount() - info.dwTime) : 0u;
+        }
+
+        private const int ProcessPowerThrottling = 4;
+        private const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
+        private const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_POWER_THROTTLING_STATE
+        {
+            public uint Version;
+            public uint ControlMask;
+            public uint StateMask;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetProcessInformation(IntPtr hProcess, int ProcessInformationClass, ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, int ProcessInformationSize);
+
+        private bool isEcoMode;
+
+        private void SetEfficiencyMode(bool enable)
+        {
+            if (isEcoMode == enable) return;
+            isEcoMode = enable;
+            try
+            {
+                using (var p = Process.GetCurrentProcess())
+                {
+                    var state = new PROCESS_POWER_THROTTLING_STATE
+                    {
+                        Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                        ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                        StateMask = enable ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0u
+                    };
+                    SetProcessInformation(p.Handle, ProcessPowerThrottling, ref state, Marshal.SizeOf(typeof(PROCESS_POWER_THROTTLING_STATE)));
+                }
+            }
+            catch { }
+        }
+
+        private static readonly string[] BlockedResourcePatterns =
+        {
+            "*://*.doubleclick.net/*",
+            "*://*.googlesyndication.com/*",
+            "*://*.google-analytics.com/*",
+            "*://*.sentry.io/*",
+            "*://*.bugsnag.com/*",
+            "*://crashlogs.whatsapp.net/*"
+        };
+
+        private void TrimProcessMemory()
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    security?.TrimBrowserWorkingSets();
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    GC.WaitForPendingFinalizers();
+                }
+                catch { }
+            });
+        }
+
+        private readonly LowLevelMouseProc mouseProc;
+        private IntPtr mouseHook = IntPtr.Zero;
+        private readonly HashSet<ToolStripDropDown> activeDropDowns = new HashSet<ToolStripDropDown>();
 
         private int S(float v) => (int)Math.Round(v * scale);
 
         public MainForm(EventWaitHandle showSignal, Security security)
         {
+            mouseProc = MouseHookCallback;
             this.security = security;
             using (var g = Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96f;
 
@@ -112,31 +274,69 @@ namespace MessengerHub
             Controls.Add(menu);
             MainMenuStrip = menu;
 
+            if (WM_TASKBARBUTTONCREATED != 0)
+            {
+                try { ChangeWindowMessageFilter(WM_TASKBARBUTTONCREATED, MSGFLT_ADD); } catch { }
+            }
+
+            StartStartupPriorityBoost();
+
             Load += async (s, e) => await StartAsync();
+            Shown += (s, e) => UpdateTaskbarOverlay(accounts.Sum(a => a.Unread), true);
             FormClosing += OnFormClosing;
             FormClosed += (s, e) =>
             {
+                UnhookMouse();
                 showSignalWait?.Unregister(null);
-                refreshTimer.Dispose();
+                startupPriorityTimer?.Dispose();
+                updateCheckTimer.Dispose();
+                idleMonitorTimer.Dispose();
                 identityTimer.Dispose();
                 unreadTimer.Dispose();
-                priorityTimer.Dispose();
                 startupWatchdog?.Dispose();
+                saveDebounceTimer.Dispose();
                 tray.Dispose();
                 foreach (var ic in trayIcons) ic?.Dispose();
+                if (taskbarBadgeHIcon != IntPtr.Zero)
+                {
+                    DestroyIcon(taskbarBadgeHIcon);
+                    taskbarBadgeHIcon = IntPtr.Zero;
+                }
             };
 
-            refreshTimer.Tick += (s, e) => AutoRefreshTick();
-            refreshTimer.Start();
+            saveDebounceTimer.Tick += (s, e) =>
+            {
+                saveDebounceTimer.Stop();
+                settings.Save(AppPaths.SettingsFile);
+            };
 
-            identityTimer.Tick += async (s, e) => { await AutoNameTickAsync(); CalibrateCacheTick(); };
+            updateCheckTimer.Tick += (s, e) => UpdateCheckTick();
+            updateCheckTimer.Start();
+
+            idleMonitorTimer.Tick += async (s, e) => await IdleMonitorTickAsync();
+            idleMonitorTimer.Start();
+
+            identityTimer.Tick += async (s, e) =>
+            {
+                await AutoNameTickAsync();
+                UpdateIdentityTimerState();
+            };
             identityTimer.Start();
 
             unreadTimer.Tick += async (s, e) => await UnreadPollAsync();
             unreadTimer.Start();
 
             // Hidden in tray or minimized -> all accounts go to background mode.
-            VisibleChanged += (s, e) => ApplyBackgroundState();
+            VisibleChanged += async (s, e) =>
+            {
+                ApplyBackgroundState();
+                if (Visible)
+                {
+                    UpdateTaskbarOverlay(accounts.Sum(a => a.Unread), true);
+                    await Task.Delay(250);
+                    if (!IsDisposed && Visible) UpdateTaskbarOverlay(accounts.Sum(a => a.Unread), true);
+                }
+            };
             Resize += (s, e) =>
             {
                 bool minimized = WindowState == FormWindowState.Minimized;
@@ -148,6 +348,99 @@ namespace MessengerHub
             {
                 try { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)RestoreFromTray); } catch { }
             }, null, -1, false);
+        }
+
+        private void RegisterDropDown(ToolStripDropDown dropDown)
+        {
+            if (dropDown == null) return;
+            dropDown.Opened += (s, e) =>
+            {
+                activeDropDowns.Add(dropDown);
+                EnsureMouseHook();
+            };
+            dropDown.Closed += (s, e) =>
+            {
+                activeDropDowns.Remove(dropDown);
+                if (activeDropDowns.Count == 0) UnhookMouse();
+            };
+        }
+
+        private void EnsureMouseHook()
+        {
+            if (mouseHook != IntPtr.Zero) return;
+            try
+            {
+                using (var curProcess = Process.GetCurrentProcess())
+                using (var curModule = curProcess.MainModule)
+                {
+                    mouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, GetModuleHandle(curModule.ModuleName), 0);
+                }
+            }
+            catch { }
+        }
+
+        private void UnhookMouse()
+        {
+            if (mouseHook != IntPtr.Zero)
+            {
+                try { UnhookWindowsHookEx(mouseHook); } catch { }
+                mouseHook = IntPtr.Zero;
+            }
+        }
+
+        private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                int msg = (int)wParam;
+                if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_NCLBUTTONDOWN || msg == WM_NCRBUTTONDOWN)
+                {
+                    var info = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    var pt = new Point(info.pt.x, info.pt.y);
+
+                    bool inside = false;
+                    foreach (var d in activeDropDowns)
+                    {
+                        if (d != null && d.Visible && d.Bounds.Contains(pt))
+                        {
+                            inside = true;
+                            break;
+                        }
+                    }
+
+                    if (!inside && menu.Visible && menu.RectangleToScreen(menu.ClientRectangle).Contains(pt))
+                    {
+                        inside = true;
+                    }
+
+                    if (!inside)
+                    {
+                        try { BeginInvoke((Action)CloseAllMenus); } catch { }
+                    }
+                }
+            }
+            return CallNextHookEx(mouseHook, nCode, wParam, lParam);
+        }
+
+        public void CloseAllMenus()
+        {
+            foreach (ToolStripItem item in menu.Items)
+            {
+                if (item is ToolStripDropDownItem dropDownItem && dropDownItem.DropDown.Visible)
+                {
+                    dropDownItem.DropDown.Close();
+                }
+            }
+
+            if (addMenu.Visible) addMenu.Close();
+
+            foreach (var a in accounts)
+            {
+                if (a.Button?.ContextMenuStrip != null && a.Button.ContextMenuStrip.Visible)
+                {
+                    a.Button.ContextMenuStrip.Close();
+                }
+            }
         }
 
         // ------------------------------------------------------------------ UI
@@ -193,24 +486,52 @@ namespace MessengerHub
             menu.Items.Add(help);
             menu.Items.Add(size);
             menu.Dock = DockStyle.Top;
+
+            foreach (ToolStripItem item in menu.Items)
+            {
+                if (item is ToolStripDropDownItem ddi) RegisterDropDown(ddi.DropDown);
+            }
+            RegisterDropDown(add.DropDown);
         }
 
         /// <summary>
-        /// One line per account (in sidebar order): "Name    1,234 MB". Cache size is measured on the
-        /// spot each time the Size menu opens, so the numbers are current.
+        /// One line per account (in sidebar order): "Name    1,234 MB". Cache size is measured on a
+        /// background thread each time the Size menu opens so the UI never freezes.
         /// </summary>
         private ToolStripItem[] CacheSizeItems()
         {
             if (accounts.Count == 0 || security == null)
                 return new ToolStripItem[] { new ToolStripMenuItem("(no accounts)") { Enabled = false } };
 
-            return accounts.Select(a =>
+            var snapshot = accounts.Select(a => new
             {
-                long mb = security.MeasureProfileCache(a.Id) / (1024L * 1024L);
-                string text = a.Name + "    " +
-                    mb.ToString("#,##0", System.Globalization.CultureInfo.InvariantCulture) + " MB";
-                return (ToolStripItem)new ToolStripMenuItem(text);
-            }).ToArray();
+                Id = a.Id,
+                Name = a.Name,
+                Item = new ToolStripMenuItem(a.Name + "    ...")
+            }).ToList();
+
+            Task.Run(() =>
+            {
+                foreach (var entry in snapshot)
+                {
+                    long mb = security.MeasureProfileCache(entry.Id) / (1024L * 1024L);
+                    string text = entry.Name + "    " +
+                        mb.ToString("#,##0", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+                    try
+                    {
+                        if (IsHandleCreated && !IsDisposed)
+                        {
+                            BeginInvoke((Action)(() =>
+                            {
+                                if (!entry.Item.IsDisposed) entry.Item.Text = text;
+                            }));
+                        }
+                    }
+                    catch { }
+                }
+            });
+
+            return snapshot.Select(x => (ToolStripItem)x.Item).ToArray();
         }
 
         private void BuildSidebar()
@@ -228,6 +549,7 @@ namespace MessengerHub
 
             // "+" opens a menu with every supported messenger.
             AddServiceItems(addMenu.Items);
+            RegisterDropDown(addMenu);
 
             addButton.IsAddButton = true;
             addButton.Size = new Size(S(SidebarWidth), S(ButtonHeight));
@@ -253,7 +575,10 @@ namespace MessengerHub
         private void AddServiceItems(ToolStripItemCollection items)
         {
             foreach (var service in ServiceType.All)
-                items.Add(service.Name, service.MenuIcon(S(16)), async (s, e) => await AddAccountAsync(service));
+            {
+                string label = service == ServiceType.Custom ? "Custom..." : service.Name;
+                items.Add(label, service.MenuIcon(S(16)), async (s, e) => await AddAccountAsync(service));
+            }
         }
 
         /// <summary>Swaps a menu's items, disposing the old ones (menus are rebuilt each time they open).</summary>
@@ -355,87 +680,63 @@ namespace MessengerHub
 
         // ------------------------------------------------------------------ Startup
 
-        // ------------------------------------------------------------------ Startup priority boost
-
-        /// <summary>
-        /// Run this app and all its WebView2 processes at AboveNormal priority for the first minute after
-        /// launch (so the accounts load faster under load), then drop everything back to Normal. Re-applied
-        /// every few seconds during the window so WebView2 processes spawned mid-startup are covered too.
-        /// </summary>
-        private void StartPriorityBoost()
-        {
-            boostUntilUtc = DateTime.UtcNow.AddMinutes(1);
-            SetOwnTreePriority(ProcessPriorityClass.AboveNormal);
-            priorityTimer.Tick += (s, e) =>
-            {
-                if (DateTime.UtcNow < boostUntilUtc)
-                    SetOwnTreePriority(ProcessPriorityClass.AboveNormal);
-                else
-                {
-                    SetOwnTreePriority(ProcessPriorityClass.Normal);
-                    priorityTimer.Stop();
-                }
-            };
-            priorityTimer.Start();
-        }
-
-        /// <summary>Set this process and all its descendants (the WebView2 processes) to the given priority.</summary>
-        private static void SetOwnTreePriority(ProcessPriorityClass priority)
-        {
-            try
-            {
-                int myPid = Process.GetCurrentProcess().Id;
-
-                // Map parent -> children across all processes, then collect our descendants.
-                var children = new Dictionary<int, List<int>>();
-                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId FROM Win32_Process"))
-                using (var results = searcher.Get())
-                {
-                    foreach (ManagementObject mo in results)
-                    {
-                        try
-                        {
-                            int pid = Convert.ToInt32(mo["ProcessId"]);
-                            int ppid = Convert.ToInt32(mo["ParentProcessId"]);
-                            if (!children.TryGetValue(ppid, out var list)) { list = new List<int>(); children[ppid] = list; }
-                            list.Add(pid);
-                        }
-                        catch { }
-                    }
-                }
-
-                var pids = new List<int> { myPid };
-                var queue = new Queue<int>();
-                queue.Enqueue(myPid);
-                while (queue.Count > 0)
-                {
-                    int cur = queue.Dequeue();
-                    if (children.TryGetValue(cur, out var kids))
-                        foreach (var k in kids) { pids.Add(k); queue.Enqueue(k); }
-                }
-
-                foreach (var pid in pids)
-                {
-                    try { using (var p = Process.GetProcessById(pid)) p.PriorityClass = priority; }
-                    catch { /* process gone or access denied */ }
-                }
-            }
-            catch
-            {
-                // WMI unavailable: at least set our own process.
-                try { Process.GetCurrentProcess().PriorityClass = priority; } catch { }
-            }
-        }
-
         private async Task StartAsync()
         {
-            // Give startup a head start: boost priority for the first minute, then back to Normal.
-            StartPriorityBoost();
+            // First run: one WhatsApp account. Its id "whatsapp" keeps the login from version 0.1.
+            string saved = settings.Get("Accounts");
+            var ids = saved == null
+                ? new List<string> { "whatsapp" }
+                : saved.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+
+            foreach (var id in ids)
+            {
+                string rawType = settings.Get("Type." + id, ServiceType.WhatsApp.Key);
+                var service = ServiceType.ByKey(rawType);
+                string customUrl = null;
+                bool showBar = false;
+                if (service == ServiceType.Custom)
+                {
+                    customUrl = Account.NormalizeUrl(settings.Get("Url." + id))
+                        ?? (string.Equals(rawType, "wechat", StringComparison.OrdinalIgnoreCase)
+                            ? "https://web.wechat.com/"
+                            : ServiceType.Custom.Url);
+                    showBar = settings.Get("Bar." + id) == "1";
+                }
+                string defaultName = service == ServiceType.Custom ? NextCustomName(customUrl) : NextName(service);
+                var acc = CreateAccount(id, service, settings.Get("Name." + id) ?? defaultName, customUrl, showBar);
+                acc.Silent = settings.Get("Silent." + id) == "1";
+                acc.Identity = settings.Get("Id." + id); // known identity, for duplicate detection
+                settings.Remove("CacheLimit." + id);
+                RefreshButton(acc);
+            }
+            SaveSettings();
+
+            string last = settings.Get("ActiveAccount");
+            var initial = accounts.FirstOrDefault(a => a.Id == last) ?? accounts.FirstOrDefault();
+            SelectAccount(initial);
+
+            // Unlock the active account's profile on a background thread in parallel with WebView2 engine startup.
+            var initialUnlockTask = security != null && initial != null
+                ? security.UnlockProfileAsync(initial.Id)
+                : Task.CompletedTask;
 
             try
             {
-                // One shared browser engine; each account gets its own profile inside data\WebView2.
-                env = await CoreWebView2Environment.CreateAsync(null, AppPaths.WebView);
+                // One shared browser engine with background optimization flags; each account gets its own profile.
+                var envOptions = new CoreWebView2EnvironmentOptions
+                {
+                    AdditionalBrowserArguments = "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
+                                                 "--enable-features=SubframeShutdownDelay " +
+                                                 "--disable-background-timer-throttling " +
+                                                 "--disable-backgrounding-occluded-windows " +
+                                                 "--disable-renderer-backgrounding " +
+                                                 "--disable-sync " +
+                                                 "--disable-component-update " +
+                                                 "--disable-domain-reliability " +
+                                                 "--disable-gpu-shader-disk-cache " +
+                                                 "--js-flags=\"--optimize-for-size\""
+                };
+                env = await CoreWebView2Environment.CreateAsync(null, AppPaths.WebView, envOptions);
             }
             catch (WebView2RuntimeNotFoundException)
             {
@@ -455,31 +756,29 @@ namespace MessengerHub
                 return;
             }
 
-            // First run: one WhatsApp account. Its id "whatsapp" keeps the login from version 0.1.
-            string saved = settings.Get("Accounts");
-            var ids = saved == null
-                ? new List<string> { "whatsapp" }
-                : saved.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries).ToList();
-
-            foreach (var id in ids)
+            // Initialize the active account first, then automatically initialize ALL remaining accounts
+            // with a 500ms stagger so every profile connects cleanly without CPU or network starvation at startup.
+            var remaining = accounts.Where(a => a != initial).ToList();
+            if (initial != null)
             {
-                var service = ServiceType.ByKey(settings.Get("Type." + id, ServiceType.WhatsApp.Key));
-                var acc = CreateAccount(id, service, settings.Get("Name." + id) ?? NextName(service));
-                acc.Silent = settings.Get("Silent." + id) == "1";
-                acc.Identity = settings.Get("Id." + id); // known identity, for duplicate detection
-                // Apply a previously measured cache limit, or mark for calibration (keeps the service default meanwhile).
-                if (int.TryParse(settings.Get("CacheLimit." + id), out int limMb))
-                    security?.SetCacheLimit(id, limMb);
-                else
-                    acc.NeedsCalibration = true;
-                RefreshButton(acc);
+                await initialUnlockTask;
+                // Begin unlocking all remaining profiles in parallel in the background.
+                if (security != null)
+                {
+                    foreach (var bg in remaining) _ = security.UnlockProfileAsync(bg.Id);
+                }
+                await InitAccountAsync(initial);
+                await Task.Delay(500);
             }
-            SaveSettings();
 
-            string last = settings.Get("ActiveAccount");
-            SelectAccount(accounts.FirstOrDefault(a => a.Id == last) ?? accounts.FirstOrDefault());
-
-            await Task.WhenAll(accounts.ToList().Select(InitAccountAsync));
+            foreach (var acc in remaining)
+            {
+                await Task.Delay(500);
+                if (IsDisposed) return;
+                await InitAccountAsync(acc);
+            }
+            UpdateIdentityTimerState();
+            UpdateUnreadTimerState();
 
             // Some accounts occasionally hang on their own loading screen when many load at
             // once; reload any that are still stuck a short time after startup (once each).
@@ -487,27 +786,30 @@ namespace MessengerHub
 
             // Check for a new version in the background (silent, at most once a week).
             Updater.StartBackgroundCheck();
+
+            // Compact managed heap and release startup working-set pages back to the OS.
+            TrimProcessMemory();
         }
 
         // ------------------------------------------------------------------ Startup load recovery
 
-        private const int MaxStartupReloads = 2;
+        private const int MaxStartupReloads = 3;
         private System.Windows.Forms.Timer startupWatchdog;
         private int startupPasses;
 
         /// <summary>
-        /// After startup, reload any account that never finished loading, and the account you're
-        /// looking at if its page didn't come up usable (e.g. a half-loaded chat list). Runs twice
-        /// (~20s and ~40s), because the first reload can itself land while startup is still busy.
+        /// After startup, reload any account that never finished loading, and any account whose
+        /// page didn't come up usable (e.g. blank dark screen or broken client initialization).
+        /// Runs 4 passes (~15s, ~30s, ~45s, ~60s) covering all active and background accounts.
         /// </summary>
         private void StartStartupWatchdog()
         {
             startupWatchdog?.Dispose();
             startupPasses = 0;
-            startupWatchdog = new System.Windows.Forms.Timer { Interval = 20000 };
+            startupWatchdog = new System.Windows.Forms.Timer { Interval = 15000 };
             startupWatchdog.Tick += async (s, e) =>
             {
-                if (++startupPasses >= 2) startupWatchdog.Stop();
+                if (++startupPasses >= 4) startupWatchdog.Stop();
                 foreach (var acc in accounts.ToList()) await CheckStartupLoad(acc);
             };
             startupWatchdog.Start();
@@ -515,17 +817,20 @@ namespace MessengerHub
 
         private async Task CheckStartupLoad(Account acc)
         {
-            if (acc.View.IsDisposed) return;
+            if (!acc.InitStarted || acc.View.IsDisposed) return;
             var core = acc.View.CoreWebView2;
             if (core == null || acc.StartupReloads >= MaxStartupReloads) return;
 
-            bool stuck = !acc.FirstLoadOk;                 // a navigation never completed
-            if (!stuck && acc == active)                   // completed, but the view you see may be half-loaded
-                stuck = !await IsReady(acc);
+            // If initial navigation is still running in background, give it time to finish.
+            if (!acc.FirstNavDone.Task.IsCompleted) return;
+            if (DateTime.UtcNow - acc.LoadedAt < TimeSpan.FromSeconds(10)) return;
+
+            bool stuck = !acc.FirstLoadOk || !await IsReady(acc);
 
             if (stuck)
             {
                 acc.StartupReloads++;
+                acc.LastRecoverUtc = DateTime.UtcNow;
                 try { core.Reload(); } catch { }
             }
         }
@@ -603,17 +908,49 @@ namespace MessengerHub
             return service.Name + " " + n;
         }
 
-        private Account CreateAccount(string id, ServiceType service, string name)
+        private string NextCustomName(string url)
         {
-            var acc = new Account { Id = id, Name = name, Service = service };
+            string baseName = Account.DefaultNameFromUrl(url);
+            if (!accounts.Any(a => string.Equals(a.Name, baseName, StringComparison.OrdinalIgnoreCase)))
+                return baseName;
+            int n = 2;
+            while (accounts.Any(a => string.Equals(a.Name, baseName + " " + n, StringComparison.OrdinalIgnoreCase))) n++;
+            return baseName + " " + n;
+        }
+
+        private Account CreateAccount(string id, ServiceType service, string name, string customUrl = null, bool showAddressBar = false)
+        {
+            var acc = new Account
+            {
+                Id = id,
+                Name = name,
+                Service = service,
+                CustomUrl = customUrl,
+                ShowAddressBar = showAddressBar,
+            };
 
             acc.View = new WebView2
             {
                 Dock = DockStyle.Fill,
                 DefaultBackgroundColor = ContentColor,
-                Visible = false,
+                Visible = acc.IsCustom,
             };
-            content.Controls.Add(acc.View);
+
+            if (acc.IsCustom)
+            {
+                acc.Container = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = ContentColor,
+                    Visible = false,
+                };
+                acc.BrowserBar = BuildBrowserBar(acc);
+                acc.BrowserBar.Visible = acc.ShowAddressBar;
+                // Docking order: Fill first, Top second so WebView2 fills the area below the bar.
+                acc.Container.Controls.Add(acc.View);
+                acc.Container.Controls.Add(acc.BrowserBar);
+            }
+            content.Controls.Add(acc.HostControl);
 
             acc.Button = new AccountButton
             {
@@ -634,17 +971,212 @@ namespace MessengerHub
             var ctx = new ContextMenuStrip();
             ctx.Opening += (s, e) => ReplaceItems(ctx.Items, AccountMenuItems(acc));
             ctx.Items.Add("(loading)"); // placeholder: a menu needs one item to open
+            RegisterDropDown(ctx);
             acc.Button.ContextMenuStrip = ctx;
+
 
             // Keep the + button last.
             accountList.Controls.Add(acc.Button);
             accountList.Controls.SetChildIndex(addButton, accountList.Controls.Count - 1);
 
-            security?.SetCacheLimit(acc.Id, acc.Service.CacheLimitMB); // so the exit cache-trim knows this account's limit
-            security?.SetAlwaysClear(acc.Id, acc.Service.AlwaysClearCache); // full-site tiles clear cache every exit
             accounts.Add(acc);
             RefreshButton(acc);
             return acc;
+        }
+
+        private Panel BuildBrowserBar(Account acc)
+        {
+            var bar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = S(36),
+                BackColor = SidebarColor,
+                Padding = new Padding(S(6), S(4), S(6), S(5)),
+            };
+            bar.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(Color.FromArgb(46, 60, 69)))
+                    e.Graphics.DrawLine(pen, 0, bar.Height - 1, bar.Width, bar.Height - 1);
+            };
+
+            Button MakeNavButton(string glyph, string tooltip, EventHandler onClick)
+            {
+                var btn = new Button
+                {
+                    Text = glyph,
+                    FlatStyle = FlatStyle.Flat,
+                    Size = new Size(S(26), S(26)),
+                    Margin = new Padding(0, 0, S(2), 0),
+                    BackColor = SidebarColor,
+                    ForeColor = Color.FromArgb(215, 225, 230),
+                    Font = new Font("Segoe UI Symbol", 9.5f),
+                    TabStop = false,
+                    Cursor = Cursors.Hand,
+                };
+                btn.FlatAppearance.BorderSize = 0;
+                btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(48, 64, 74);
+                btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 76, 88);
+                btn.Click += onClick;
+                tips.SetToolTip(btn, tooltip);
+                return btn;
+            }
+
+            acc.BackButton = MakeNavButton("\u2190", "Back", (s, e) =>
+            {
+                try { if (acc.View.CoreWebView2?.CanGoBack == true) acc.View.CoreWebView2.GoBack(); } catch { }
+            });
+            acc.BackButton.Enabled = false;
+
+            acc.ForwardButton = MakeNavButton("\u2192", "Forward", (s, e) =>
+            {
+                try { if (acc.View.CoreWebView2?.CanGoForward == true) acc.View.CoreWebView2.GoForward(); } catch { }
+            });
+            acc.ForwardButton.Enabled = false;
+
+            var reloadBtn = MakeNavButton("\u21BB", "Reload", (s, e) =>
+            {
+                try { acc.View.CoreWebView2?.Reload(); } catch { }
+            });
+
+            var homeBtn = MakeNavButton("\u2302", "Go to starting URL", (s, e) =>
+            {
+                try { acc.View.CoreWebView2?.Navigate(acc.StartUrl); } catch { }
+            });
+
+            var urlBorder = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = ContentColor,
+                Margin = new Padding(S(4), S(1), S(4), S(1)),
+                Padding = new Padding(S(7), S(3), S(7), S(2)),
+            };
+            bool urlFocused = false;
+            urlBorder.Paint += (s, e) =>
+            {
+                var c = urlFocused ? Color.FromArgb(85, 140, 180) : Color.FromArgb(55, 72, 82);
+                using (var pen = new Pen(c))
+                    e.Graphics.DrawRectangle(pen, 0, 0, urlBorder.Width - 1, urlBorder.Height - 1);
+            };
+
+            acc.AddressBox = new TextBox
+            {
+                BorderStyle = BorderStyle.None,
+                Dock = DockStyle.Fill,
+                BackColor = ContentColor,
+                ForeColor = Color.FromArgb(225, 235, 240),
+                Font = new Font("Segoe UI", 9.5f),
+                Text = acc.StartUrl,
+            };
+            acc.AddressBox.GotFocus += (s, e) => { urlFocused = true; urlBorder.Invalidate(); };
+            acc.AddressBox.LostFocus += (s, e) => { urlFocused = false; urlBorder.Invalidate(); SyncBrowserBar(acc); };
+            acc.AddressBox.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    NavigateCustomAddress(acc, acc.AddressBox.Text);
+                }
+                else if (e.KeyCode == Keys.Escape)
+                {
+                    e.SuppressKeyPress = true;
+                    SyncBrowserBar(acc);
+                    try { acc.View.Focus(); } catch { }
+                }
+            };
+            urlBorder.Controls.Add(acc.AddressBox);
+
+            var hideBtn = MakeNavButton("\u2715", "Hide address bar (toggle in right-click menu)", (s, e) =>
+                SetAddressBarVisible(acc, false));
+            hideBtn.Margin = Padding.Empty;
+
+            var grid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 6,
+                RowCount = 1,
+                BackColor = SidebarColor,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+            };
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            grid.Controls.Add(acc.BackButton, 0, 0);
+            grid.Controls.Add(acc.ForwardButton, 1, 0);
+            grid.Controls.Add(reloadBtn, 2, 0);
+            grid.Controls.Add(homeBtn, 3, 0);
+            grid.Controls.Add(urlBorder, 4, 0);
+            grid.Controls.Add(hideBtn, 5, 0);
+
+            bar.Controls.Add(grid);
+            return bar;
+        }
+
+        private static void SyncBrowserBar(Account acc)
+        {
+            if (acc == null || !acc.IsCustom || acc.BrowserBar == null) return;
+            var core = acc.View?.CoreWebView2;
+            if (acc.BackButton != null) acc.BackButton.Enabled = core != null && core.CanGoBack;
+            if (acc.ForwardButton != null) acc.ForwardButton.Enabled = core != null && core.CanGoForward;
+            if (acc.AddressBox != null && !acc.AddressBox.Focused)
+            {
+                string src = core?.Source;
+                acc.AddressBox.Text = !string.IsNullOrEmpty(src) && IsWebUrl(src) ? src : acc.StartUrl;
+            }
+        }
+
+        private void SetAddressBarVisible(Account acc, bool visible)
+        {
+            if (acc == null || !acc.IsCustom) return;
+            acc.ShowAddressBar = visible;
+            if (acc.BrowserBar != null) acc.BrowserBar.Visible = visible;
+            SyncBrowserBar(acc);
+            SaveSettings();
+        }
+
+        private void NavigateCustomAddress(Account acc, string rawInput)
+        {
+            string url = Account.NormalizeUrl(rawInput);
+            if (url == null)
+            {
+                MessageBox.Show(this, "Please enter a valid website URL (for example: discord.com).",
+                    AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                acc.AddressBox?.Focus();
+                return;
+            }
+
+            if (!acc.OwnsUrl(url))
+            {
+                acc.CustomUrl = url;
+                ResetCustomIcon(acc);
+                RefreshButton(acc);
+                SaveSettings();
+            }
+
+            if (acc.AddressBox != null) acc.AddressBox.Text = url;
+            try { acc.View.CoreWebView2?.Navigate(url); } catch { }
+            try { acc.View.Focus(); } catch { }
+        }
+
+        private void ChangeCustomUrl(Account acc)
+        {
+            if (acc == null || !acc.IsCustom) return;
+            string url = Dialogs.PromptCustomUrl(this, acc.StartUrl);
+            if (url == null) return;
+
+            bool domainChanged = !acc.OwnsUrl(url);
+            acc.CustomUrl = url;
+            if (domainChanged) ResetCustomIcon(acc);
+            RefreshButton(acc);
+            SaveSettings();
+
+            if (acc.AddressBox != null) acc.AddressBox.Text = url;
+            try { acc.View.CoreWebView2?.Navigate(url); } catch { }
         }
 
         private ToolStripItem[] AccountMenuItems(Account acc)
@@ -661,6 +1193,22 @@ namespace MessengerHub
             var remove = new ToolStripMenuItem("Re&move...");
             remove.Click += async (s, e) => await RemoveAccountAsync(acc);
 
+            if (acc.IsCustom)
+            {
+                var showBar = new ToolStripMenuItem("Show &address bar") { Checked = acc.ShowAddressBar };
+                showBar.Click += (s, e) => SetAddressBarVisible(acc, !acc.ShowAddressBar);
+
+                var changeUrl = new ToolStripMenuItem("Change &URL...");
+                changeUrl.Click += (s, e) => ChangeCustomUrl(acc);
+
+                return new ToolStripItem[]
+                {
+                    silent, showBar, new ToolStripSeparator(),
+                    changeUrl, rename, reload, new ToolStripSeparator(),
+                    remove,
+                };
+            }
+
             return new ToolStripItem[]
             {
                 silent, new ToolStripSeparator(),
@@ -674,16 +1222,21 @@ namespace MessengerHub
             acc.Button.Label = Account.ShortLabel(acc.Name);
             acc.Button.Silent = acc.Silent;
             acc.Button.Unread = acc.Unread;
-            acc.Button.SiteIcon = ServiceIcon(acc.Service);
+            acc.Button.SiteIcon = AccountIcon(acc);
             acc.Button.Invalidate();
-            tips.SetToolTip(acc.Button, acc.TooltipText());
+            string tip = acc.TooltipText();
+            if (acc.LastTooltip != tip)
+            {
+                acc.LastTooltip = tip;
+                tips.SetToolTip(acc.Button, tip);
+            }
         }
 
         // ------------------------------------------------------------------ Drag to reorder
 
         private void OnDragMove(Account acc, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left || dragAcc != acc) return;
+            if (e.Button != MouseButtons.Left || dragAcc != acc || accounts.Count == 0) return;
 
             // Start dragging only after the mouse moved a few pixels (so a click stays a click).
             if (!dragging)
@@ -696,15 +1249,16 @@ namespace MessengerHub
             }
 
             // Where would it land? Before the first icon whose middle is below the mouse.
-            var buttons = accounts.Select(a => a.Button).ToList();
+            int count = accounts.Count;
             int y = accountList.PointToClient(Cursor.Position).Y;
-            dropIndex = buttons.Count;
-            for (int i = 0; i < buttons.Count; i++)
+            dropIndex = count;
+            for (int i = 0; i < count; i++)
             {
-                if (y < buttons[i].Top + buttons[i].Height / 2) { dropIndex = i; break; }
+                var btn = accounts[i].Button;
+                if (y < btn.Top + btn.Height / 2) { dropIndex = i; break; }
             }
 
-            int lineY = dropIndex < buttons.Count ? buttons[dropIndex].Top : buttons[buttons.Count - 1].Bottom;
+            int lineY = dropIndex < count ? accounts[dropIndex].Button.Top : accounts[count - 1].Button.Bottom;
             var p = sidebar.PointToClient(accountList.PointToScreen(new Point(0, lineY)));
             dropIndicator.Top = p.Y - dropIndicator.Height / 2;
             dropIndicator.Visible = true;
@@ -735,8 +1289,30 @@ namespace MessengerHub
         // ------------------------------------------------------------------ Auto-naming
 
         /// <summary>True while the account still has its automatic name, e.g. "Telegram 2".</summary>
-        private static bool HasDefaultName(Account acc) =>
-            Regex.IsMatch(acc.Name ?? "", "^" + Regex.Escape(acc.Service.Name) + @" \d+$");
+        private static bool HasDefaultName(Account acc)
+        {
+            if (string.IsNullOrEmpty(acc.Name) || acc.Service == null) return false;
+            string prefix = acc.Service.Name + " ";
+            if (!acc.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+            string numPart = acc.Name.Substring(prefix.Length);
+            return numPart.Length > 0 && numPart.All(char.IsDigit);
+        }
+
+        private void UpdateIdentityTimerState()
+        {
+            bool anyNeedsWork = accounts.Any(a =>
+                !a.View.IsDisposed && a.InitStarted &&
+                string.IsNullOrEmpty(a.Identity) && !string.IsNullOrEmpty(a.Service.IdentityScript));
+
+            if (anyNeedsWork)
+            {
+                if (!identityTimer.Enabled) identityTimer.Start();
+            }
+            else
+            {
+                if (identityTimer.Enabled) identityTimer.Stop();
+            }
+        }
 
         /// <summary>
         /// After an account logs in, read who it is (phone number for WhatsApp/Telegram, profile name for
@@ -748,7 +1324,7 @@ namespace MessengerHub
         {
             foreach (var acc in accounts.ToList())
             {
-                if (acc.View.IsDisposed) continue;                       // removed meanwhile
+                if (!acc.InitStarted || acc.View.IsDisposed) continue;   // not started or removed meanwhile
                 if (!string.IsNullOrEmpty(acc.Identity)) continue;        // already identified
                 if (string.IsNullOrEmpty(acc.Service.IdentityScript)) continue; // service has no identity
                 var core = acc.View.CoreWebView2;
@@ -827,63 +1403,210 @@ namespace MessengerHub
 
         // ------------------------------------------------------------------ Site icons (favicons)
 
-        private string IconFile(ServiceType svc) => Path.Combine(AppPaths.Icons, svc.Key + ".png");
+        private static string IconKey(Account acc) => acc.IsCustom ? "custom_" + acc.Id : acc.Service.Key;
+        private static string IconFile(Account acc) => Path.Combine(AppPaths.Icons, IconKey(acc) + ".png");
 
         /// <summary>
-        /// The saved site icon for a messenger, or null (then the colored letter circle is shown).
+        /// The saved site icon for an account (shared per service for standard messengers, or per-tab for Custom),
+        /// or null (then the colored letter circle is shown).
         /// The file is read once; "no icon yet" is remembered too, so the disk isn't checked on every title change.
         /// </summary>
-        private Image ServiceIcon(ServiceType svc)
+        private Image AccountIcon(Account acc)
         {
-            if (serviceIcons.TryGetValue(svc.Key, out var cached)) return cached;
+            string key = IconKey(acc);
+            if (serviceIcons.TryGetValue(key, out var cached)) return cached;
             Image icon = null;
             try
             {
-                string file = IconFile(svc);
+                string file = IconFile(acc);
                 if (File.Exists(file)) icon = DecodeImage(File.ReadAllBytes(file));
             }
             catch { }
-            serviceIcons[svc.Key] = icon;
+            serviceIcons[key] = icon;
             return icon;
+        }
+
+        private void ResetCustomIcon(Account acc)
+        {
+            if (acc == null || !acc.IsCustom) return;
+            string key = IconKey(acc);
+            if (acc.Button != null) acc.Button.SiteIcon = null;
+            if (serviceIcons.TryGetValue(key, out var old))
+            {
+                serviceIcons.Remove(key);
+                old?.Dispose();
+            }
+            try
+            {
+                string file = IconFile(acc);
+                if (File.Exists(file)) File.Delete(file);
+            }
+            catch { }
         }
 
         /// <summary>
         /// Saves the site's favicon (the icon on its browser tab) the first time we see it.
         /// It's only saved while there are no unread messages, so an unread dot never gets stuck on it.
+        /// For Custom tabs, also probes DOM <link rel="icon"> tags (including SVG/apple-touch-icon) and
+        /// the host / base-domain favicon endpoints, never saving Chromium's default empty-URI globe icon.
         /// </summary>
         private async Task CaptureIconAsync(Account acc)
         {
             var svc = acc.Service;
             var core = acc.View.CoreWebView2;
-            if (core == null || acc.Unread > 0 || ServiceIcon(svc) != null) return;
-            if (svc.IconPage != null && (core.Source ?? "").IndexOf(svc.IconPage, StringComparison.OrdinalIgnoreCase) < 0) return;
-            if (!capturingIcons.Add(svc.Key)) return;
+            if (core == null || acc.Unread > 0 || AccountIcon(acc) != null) return;
+            if (!acc.IsCustom && svc.IconPage != null && (core.Source ?? "").IndexOf(svc.IconPage, StringComparison.OrdinalIgnoreCase) < 0) return;
+            string key = IconKey(acc);
+            if (!capturingIcons.Add(key)) return;
 
             try
             {
-                // Best quality: download the favicon file itself. Fallback: the image WebView2 shows on the tab.
-                Image best = await DownloadImageAsync(core.FaviconUri);
-                Image shown = await GetFaviconImageAsync(core);
-                if (shown != null && (best == null || shown.Width > best.Width)) { best?.Dispose(); best = shown; }
-                else shown?.Dispose();
+                Image best = null;
+                bool onOwnSite = !acc.IsCustom || acc.OwnsUrl(core.Source);
+
+                if (onOwnSite && !string.IsNullOrEmpty(core.FaviconUri))
+                {
+                    // Best quality: download the favicon file itself. Fallback: the image WebView2 shows on the tab
+                    // (only when FaviconUri is non-empty, otherwise WebView2 returns its default grey globe).
+                    best = await DownloadImageAsync(core.FaviconUri);
+                    Image shown = await GetFaviconImageAsync(core);
+                    best = PickLargerImage(best, shown);
+                }
+
+                if (acc.IsCustom && (best == null || best.Width < 32))
+                {
+                    if (onOwnSite)
+                    {
+                        Image domIcon = await TryExtractDomFaviconAsync(core);
+                        best = PickLargerImage(best, domIcon);
+                    }
+                    if (best == null || best.Width < 32)
+                    {
+                        Image domainIcon = await TryFetchDomainFaviconAsync(acc, onOwnSite ? core.Source : null);
+                        best = PickLargerImage(best, domainIcon);
+                    }
+                }
 
                 if (best == null || acc.Unread > 0) { best?.Dispose(); return; }
 
-                best.Save(IconFile(svc), ImageFormat.Png);
-                serviceIcons[svc.Key] = best;
-                foreach (var other in accounts.Where(x => x.Service == svc)) RefreshButton(other);
+                best.Save(IconFile(acc), ImageFormat.Png);
+                serviceIcons[key] = best;
+                if (acc.IsCustom)
+                {
+                    RefreshButton(acc);
+                }
+                else
+                {
+                    foreach (var other in accounts.Where(x => !x.IsCustom && x.Service == svc)) RefreshButton(other);
+                }
             }
             catch { }
             finally
             {
-                capturingIcons.Remove(svc.Key);
+                capturingIcons.Remove(key);
             }
+        }
+
+        private static Image PickLargerImage(Image a, Image b)
+        {
+            if (b == null) return a;
+            if (a == null) return b;
+            if (b.Width > a.Width) { a.Dispose(); return b; }
+            b.Dispose();
+            return a;
+        }
+
+        private const string DomFaviconEvalJson =
+            "{\"expression\":\"(async()=>{try{const links=Array.from(document.querySelectorAll('link[rel]'))" +
+            ".filter(l=>/(^|[\\\\s-])icon($|[\\\\s-])/i.test(l.rel)&&l.href);" +
+            "links.sort((a,b)=>{const sc=e=>{let v=/apple-touch-icon/i.test(e.rel)?500:0;" +
+            "const m=/(\\\\d+)x\\\\d+/i.exec(e.getAttribute('sizes')||'');if(m)v+=parseInt(m[1],10);" +
+            "if(/\\\\.svg(\\\\?|$)/i.test(e.href))v+=300;return v;};return sc(b)-sc(a);});" +
+            "const urls=links.map(l=>l.href);if(!urls.length)urls.push(new URL('/favicon.ico',location.origin).href);" +
+            "for(const u of urls){try{const d=await new Promise((res,rej)=>{const i=new Image();i.crossOrigin='anonymous';" +
+            "const t=setTimeout(()=>rej(),2500);i.onload=()=>{clearTimeout(t);if(i.naturalWidth<8||i.naturalHeight<8){rej();return;}" +
+            "const s=Math.min(128,Math.max(64,i.naturalWidth)),c=document.createElement('canvas');c.width=s;c.height=s;" +
+            "c.getContext('2d').drawImage(i,0,0,s,s);res(c.toDataURL('image/png'));};" +
+            "i.onerror=()=>{clearTimeout(t);rej();};i.src=u;});if(d)return d;}catch(e){}}" +
+            "return 'URLS:'+urls.slice(0,4).join('|');}catch(e){return '';}})()\"," +
+            "\"awaitPromise\":true,\"returnByValue\":true}";
+
+        private static async Task<Image> TryExtractDomFaviconAsync(CoreWebView2 core)
+        {
+            try
+            {
+                string cdpJson = await core.CallDevToolsProtocolMethodAsync("Runtime.evaluate", DomFaviconEvalJson);
+                var m = Regex.Match(cdpJson ?? "", "\"value\"\\s*:\\s*(\"[^\"]*\")");
+                if (!m.Success) return null;
+                string val = DecodeJsonString(m.Groups[1].Value);
+                if (string.IsNullOrEmpty(val)) return null;
+                if (val.StartsWith("data:image/png;base64,", StringComparison.OrdinalIgnoreCase))
+                    return await DownloadImageAsync(val);
+                if (val.StartsWith("URLS:", StringComparison.Ordinal))
+                {
+                    Image best = null;
+                    foreach (var u in val.Substring(5).Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        best = PickLargerImage(best, await DownloadImageAsync(u));
+                        if (best != null && best.Width >= 64) break;
+                    }
+                    return best;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static async Task<Image> TryFetchDomainFaviconAsync(Account acc, string activeSourceUrl)
+        {
+            var hosts = new List<string>();
+            void AddHost(string url)
+            {
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var u) || string.IsNullOrEmpty(u.Host)) return;
+                string h = u.Host.ToLowerInvariant();
+                if (!hosts.Contains(h)) hosts.Add(h);
+                string baseDom = Account.GetBaseDomain(h);
+                if (!string.IsNullOrEmpty(baseDom) && baseDom.Contains("."))
+                {
+                    if (!hosts.Contains("www." + baseDom)) hosts.Add("www." + baseDom);
+                    if (!hosts.Contains(baseDom)) hosts.Add(baseDom);
+                }
+            }
+
+            AddHost(activeSourceUrl);
+            AddHost(acc.StartUrl);
+
+            var candidates = new List<string>();
+            foreach (var h in hosts)
+            {
+                candidates.Add("https://" + h + "/apple-touch-icon.png");
+                candidates.Add("https://" + h + "/favicon.ico");
+            }
+
+            // Fallback for domains behind bot/Cloudflare challenges: returns HTTP 200 only when a real favicon
+            // exists for the domain, and HTTP 404 when none exists (which DownloadImageAsync ignores).
+            if (Uri.TryCreate(acc.StartUrl, UriKind.Absolute, out var startUri) &&
+                startUri.HostNameType == UriHostNameType.Dns && startUri.Host.Contains("."))
+            {
+                string baseDom = Account.GetBaseDomain(startUri.Host);
+                candidates.Add("https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=" +
+                               Uri.EscapeDataString("https://" + baseDom) + "&size=128");
+            }
+
+            Image best = null;
+            foreach (var url in candidates)
+            {
+                best = PickLargerImage(best, await DownloadImageAsync(url));
+                if (best != null && best.Width >= 48) break;
+            }
+            return best;
         }
 
         private static async Task<Image> GetFaviconImageAsync(CoreWebView2 core)
         {
             try
             {
+                if (string.IsNullOrEmpty(core.FaviconUri)) return null;
                 using (var stream = await core.GetFaviconAsync(CoreWebView2FaviconImageFormat.Png))
                 using (var ms = new MemoryStream())
                 {
@@ -904,22 +1627,65 @@ namespace MessengerHub
                 if (url.StartsWith(pngData, StringComparison.OrdinalIgnoreCase))
                     return DecodeImage(Convert.FromBase64String(url.Substring(pngData.Length)));
                 if (!IsWebUrl(url)) return null;
-                return DecodeImage(await http.GetByteArrayAsync(url));
+                using (var resp = await http.GetAsync(url))
+                {
+                    if (!resp.IsSuccessStatusCode) return null;
+                    byte[] bytes = await resp.Content.ReadAsByteArrayAsync();
+                    return bytes != null && bytes.Length > 0 ? DecodeImage(bytes) : null;
+                }
             }
             catch { return null; }
         }
 
-        /// <summary>PNG/JPG/GIF/BMP, or .ico (largest size). SVG isn't supported and returns null.</summary>
+        /// <summary>PNG/JPG/GIF/BMP, or .ico (extracts largest embedded PNG/BMP frame). Rejects 1x1 pixels.</summary>
         private static Image DecodeImage(byte[] bytes)
         {
             try
             {
-                using (var ms = new MemoryStream(bytes))
+                if (bytes == null || bytes.Length < 8) return null;
+                bool isIco = bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 1 && bytes[3] == 0;
+                if (isIco)
                 {
-                    bool isIco = bytes.Length > 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 1 && bytes[3] == 0;
-                    if (isIco)
-                        using (var ico = new Icon(ms, 256, 256)) return ico.ToBitmap();
-                    using (var img = Image.FromStream(ms)) return new Bitmap(img);
+                    int count = bytes[4] | (bytes[5] << 8);
+                    int bestSize = -1, bestOffset = -1, bestLen = 0;
+                    for (int i = 0; i < count && 6 + (i + 1) * 16 <= bytes.Length; i++)
+                    {
+                        int entry = 6 + i * 16;
+                        int w = bytes[entry] == 0 ? 256 : bytes[entry];
+                        int h = bytes[entry + 1] == 0 ? 256 : bytes[entry + 1];
+                        int len = BitConverter.ToInt32(bytes, entry + 8);
+                        int off = BitConverter.ToInt32(bytes, entry + 12);
+                        if (len > 8 && off >= 0 && off + len <= bytes.Length && w * h > bestSize)
+                        {
+                            bestSize = w * h;
+                            bestOffset = off;
+                            bestLen = len;
+                        }
+                    }
+                    // Modern .ico files embed high-res PNG frames directly inside the ICO container.
+                    if (bestOffset >= 0 && bytes[bestOffset] == 0x89 && bytes[bestOffset + 1] == 0x50 &&
+                        bytes[bestOffset + 2] == 0x4E && bytes[bestOffset + 3] == 0x47)
+                    {
+                        using (var pms = new MemoryStream(bytes, bestOffset, bestLen))
+                        using (var pimg = Image.FromStream(pms))
+                        {
+                            if (pimg.Width >= 8 && pimg.Height >= 8) return new Bitmap(pimg);
+                        }
+                    }
+                    using (var ms = new MemoryStream(bytes))
+                    using (var ico = new Icon(ms, 256, 256))
+                    {
+                        var bmp = ico.ToBitmap();
+                        if (bmp.Width >= 8 && bmp.Height >= 8) return bmp;
+                        bmp.Dispose();
+                        return null;
+                    }
+                }
+                using (var ms = new MemoryStream(bytes))
+                using (var img = Image.FromStream(ms))
+                {
+                    if (img.Width < 8 || img.Height < 8) return null;
+                    return new Bitmap(img);
                 }
             }
             catch { return null; }
@@ -927,21 +1693,28 @@ namespace MessengerHub
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) MessengerHub");
+            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
             return client;
         }
 
         private async Task InitAccountAsync(Account acc)
         {
+            if (acc == null || acc.InitStarted || acc.View.IsDisposed) return;
+            acc.InitStarted = true;
+
             try
             {
+                if (security != null) await security.UnlockProfileAsync(acc.Id);
+                if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; }
                 var options = env.CreateCoreWebView2ControllerOptions();
                 options.ProfileName = acc.Id; // separate login/cookies per account
                 await acc.View.EnsureCoreWebView2Async(env, options);
             }
             catch (Exception ex)
             {
+                acc.FirstNavDone.TrySetResult(false);
                 if (!acc.View.IsDisposed)
                     MessageBox.Show(this, "Could not open '" + acc.Name + "':\n\n" + ex.Message,
                         AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -949,20 +1722,48 @@ namespace MessengerHub
             }
             try
             {
-                if (acc.View.IsDisposed) return; // removed while it was starting
+                if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; } // removed while it was starting
 
                 var core = acc.View.CoreWebView2;
                 try { security?.AddBrowserPid((int)core.BrowserProcessId); } catch { } // so we can wait for it on exit
                 ConfigureCore(core, acc);
                 EnableTrackingPrevention(acc); // ad/tracker blocking on by default, before the first navigation
 
+                // Ensure persistent storage and notifications are permanently granted so logins persist and badges update.
+                try
+                {
+                    if (Uri.TryCreate(acc.StartUrl, UriKind.Absolute, out var startUri))
+                    {
+                        string origin = startUri.GetLeftPart(UriPartial.Authority);
+                        _ = core.Profile.SetPermissionStateAsync(CoreWebView2PermissionKind.PersistentStorage, origin, CoreWebView2PermissionState.Allow);
+                        _ = core.Profile.SetPermissionStateAsync(CoreWebView2PermissionKind.Notifications, origin, CoreWebView2PermissionState.Allow);
+                    }
+                }
+                catch { }
+
+                // Block high-volume telemetry, analytics, and ad-beacon requests at the native browser layer.
+                foreach (var pattern in BlockedResourcePatterns)
+                {
+                    try { core.AddWebResourceRequestedFilter(pattern, CoreWebView2WebResourceContext.All); } catch { }
+                }
+                core.WebResourceRequested += (s, e) =>
+                {
+                    try { e.Response = env.CreateWebResourceResponse(Stream.Null, 204, "No Content", ""); } catch { }
+                };
+
                 core.DocumentTitleChanged += (s, e) => UpdateUnread(acc, core.DocumentTitle);
+                core.NotificationReceived += (s, e) =>
+                {
+                    if (acc.Service.UnreadScript != null) _ = PollAccountUnreadAsync(acc);
+                };
+                core.SourceChanged += (s, e) => SyncBrowserBar(acc);
+                core.HistoryChanged += (s, e) => SyncBrowserBar(acc);
                 core.NewWindowRequested += (s, e) => OnNewWindowRequested(acc, e);
                 core.NavigationStarting += (s, e) =>
                 {
                     // Keep the account on its own site; anything else opens in the default browser,
                     // except sign-in provider pages, which must load in-app so SSO can finish.
-                    if (IsWebUrl(e.Uri) && !acc.Service.Owns(e.Uri) && !IsAuthDomain(e.Uri))
+                    if (IsWebUrl(e.Uri) && !acc.OwnsUrl(e.Uri) && !IsAuthDomain(e.Uri))
                     {
                         e.Cancel = true;
                         OpenExternal(e.Uri);
@@ -970,7 +1771,18 @@ namespace MessengerHub
                 };
                 core.NavigationCompleted += (s, e) =>
                 {
-                    if (e.IsSuccess) { acc.LoadedAt = DateTime.UtcNow; acc.FirstLoadOk = true; }
+                    acc.IdleBgApplied = false;
+                    SyncBrowserBar(acc);
+                    if (e.IsSuccess)
+                    {
+                        acc.LoadedAt = DateTime.UtcNow;
+                        acc.FirstLoadOk = true;
+                        UpdateUnread(acc, core.DocumentTitle);
+                    }
+                    if (AccountIcon(acc) == null && (e.IsSuccess || acc.IsCustom))
+                        _ = CaptureIconAsync(acc);
+                    acc.FirstNavDone.TrySetResult(e.IsSuccess);
+                    if (isSystemIdle && IsVisibleActive(acc)) ApplyIdlePageFreeze(acc, true);
                 };
                 // If the page's process crashes, reload it once (rate-limited so it can't loop).
                 core.ProcessFailed += (s, e) =>
@@ -982,16 +1794,46 @@ namespace MessengerHub
                 };
                 core.FaviconChanged += async (s, e) => await CaptureIconAsync(acc);
 
+                // Ensure the web app's persistent storage is locked into the browser engine.
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnsurePersistentStorage);
                 // Videos/GIFs only play when clicked (saves CPU).
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BlockVideoAutoplay);
-                // Hide WhatsApp's "background sync" prompt and switch (it costs extra RAM/CPU).
-                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.HideWhatsAppBackgroundSync);
+                // Auto-enable WhatsApp's "Turn on background sync" prompt once when a profile first loads.
+                if (acc.Service == ServiceType.WhatsApp)
+                    await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnableWhatsAppBackgroundSync);
+                // Push unread badge changes immediately via MutationObserver for DOM-unread services.
+                if (acc.Service.UnreadScript != null)
+                    await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BuildUnreadPushScript(acc.Service.UnreadScript));
+                core.WebMessageReceived += (s, e) =>
+                {
+                    try
+                    {
+                        string msg = e.TryGetWebMessageAsString();
+                        if (msg != null && msg.StartsWith("__mh_unread:", StringComparison.Ordinal))
+                        {
+                            if (int.TryParse(msg.Substring(12), out int n) && n >= 0 && n != acc.Unread)
+                            {
+                                acc.Unread = n;
+                                RefreshButton(acc);
+                                UpdateTitle();
+                            }
+                        }
+                    }
+                    catch { }
+                };
 
-                if (acc.View.IsDisposed) return;
-                core.Navigate(acc.Service.Url);
+                if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; }
+                core.Navigate(acc.StartUrl);
+                SyncBrowserBar(acc);
                 ApplyBackgroundState();
+                UpdateIdentityTimerState();
+                UpdateUnreadTimerState();
             }
-            catch { /* the account was removed while starting */ }
+            catch
+            {
+                acc.FirstNavDone.TrySetResult(false);
+                /* the account was removed while starting */
+            }
         }
 
         /// <summary>Settings shared by account views and their pop-up windows.</summary>
@@ -1005,21 +1847,104 @@ namespace MessengerHub
             core.DownloadStarting += OnDownloadStarting;
         }
 
-        private bool IsForeground(Account a) =>
+        private bool IsVisibleActive(Account a) =>
             a == active && Visible && WindowState != FormWindowState.Minimized;
 
+        private bool IsForeground(Account a) =>
+            !isSystemIdle && IsVisibleActive(a);
+
+        private static void ApplyIdlePageFreeze(Account a, bool freeze)
+        {
+            if (a == null || a.View.IsDisposed || a.IdleBgApplied == freeze) return;
+            var core = a.View.CoreWebView2;
+            if (core == null) return;
+            a.IdleBgApplied = freeze;
+            try
+            {
+                _ = core.ExecuteScriptAsync(freeze
+                    ? "if(window.__mhSetIdleBg)window.__mhSetIdleBg(true);"
+                    : "if(window.__mhSetIdleBg)window.__mhSetIdleBg(false);");
+            }
+            catch { }
+        }
+
+
+        /// <summary>Background account housekeeping: compact its JS heap (rate limited per account).</summary>
+        private async Task PurgeIdleAccountAsync(Account a)
+        {
+            try
+            {
+                if (a == null || a.View.IsDisposed || IsForeground(a)) return;
+                var core = a.View.CoreWebView2;
+                if (core == null) return;
+
+                // Compact only this tab's V8 JS heap, at most every 10 minutes per account.
+                if ((DateTime.UtcNow - a.LastMemoryPurgeUtc).TotalMinutes >= 10)
+                {
+                    a.LastMemoryPurgeUtc = DateTime.UtcNow;
+                    try { await core.CallDevToolsProtocolMethodAsync("HeapProfiler.collectGarbage", "{}"); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateMinimizedTimestamp()
+        {
+            if (!IsHandleCreated) return;
+            bool isMinimizedOrHidden = !Visible || WindowState == FormWindowState.Minimized;
+            if (isMinimizedOrHidden)
+            {
+                if (!minimizedSinceUtc.HasValue) minimizedSinceUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                minimizedSinceUtc = null;
+            }
+        }
+
+        private bool IsAppMinimizedAtLeast10Min()
+        {
+            UpdateMinimizedTimestamp();
+            return minimizedSinceUtc.HasValue &&
+                   (DateTime.UtcNow - minimizedSinceUtc.Value).TotalMilliseconds >= IdleCacheCheckMs;
+        }
+
+        private bool IsEligibleForSilentCacheClean() =>
+            GetSystemIdleMilliseconds() >= IdleCacheCheckMs || IsAppMinimizedAtLeast10Min();
+
         /// <summary>
-        /// Background accounts (and all accounts while hidden in the tray):
-        ///  - low-memory mode (they keep running, so messages still arrive)
-        ///  - muted if the account is set to Silent
+        /// Background accounts (and all accounts while hidden in the tray or after 10 minutes of PC idle):
+        ///  - low-memory mode (they keep running, so messages and notifications still arrive)
+        ///  - V8 JS heap GC compaction
+        ///  - CSS animation / non-call video pause on idle visible tab
+        ///  - muted if the account is set to Silent and in the background
         /// </summary>
         private void ApplyBackgroundState()
         {
+            UpdateMinimizedTimestamp();
+            if (isSystemIdle && GetSystemIdleMilliseconds() < IdleCacheCheckMs)
+            {
+                isSystemIdle = false;
+                if (idleMonitorTimer.Interval != IdlePollActiveMs) idleMonitorTimer.Interval = IdlePollActiveMs;
+            }
+            if (!IsEligibleForSilentCacheClean())
+            {
+                lastIdleCacheCheckUtc = DateTime.MinValue;
+            }
+
+            // Reduce polling frequency and enable Windows EcoQoS Efficiency Mode when hidden, minimized, or PC idle >= 10m.
+            bool isVisibleOnScreen = Visible && WindowState != FormWindowState.Minimized;
+            bool isBackground = !isVisibleOnScreen || isSystemIdle;
+            SetEfficiencyMode(isBackground);
+            int targetInterval = isBackground ? UnreadBackgroundInterval : UnreadForegroundInterval;
+            if (unreadTimer.Interval != targetInterval) unreadTimer.Interval = targetInterval;
+
             foreach (var a in accounts)
             {
                 var core = a.View.CoreWebView2;
                 if (core == null) continue;
-                bool fg = IsForeground(a);
+                bool visibleActive = a == active && isVisibleOnScreen;
+                bool fg = !isSystemIdle && visibleActive;
                 try
                 {
                     core.MemoryUsageTargetLevel = fg
@@ -1027,57 +1952,90 @@ namespace MessengerHub
                         : CoreWebView2MemoryUsageTargetLevel.Low;
                 }
                 catch { }
+
+                try { _ = core.ExecuteScriptAsync("window.__mhActive = " + (fg ? "true" : "false") + ";"); } catch { }
+
+                ApplyIdlePageFreeze(a, isSystemIdle && visibleActive);
+
+                if (!fg) _ = PurgeIdleAccountAsync(a);
+
                 // Global Silent mutes everything; otherwise a per-account Silent mutes it while in the background.
-                try { core.IsMuted = globalSilent || (a.Silent && !fg); } catch { }
+                try { core.IsMuted = globalSilent || (a.Silent && !visibleActive); } catch { }
+            }
+            UpdateUnreadTimerState();
+        }
+
+        /// <summary>Periodic check for a new release (every 5 minutes; the update check itself runs weekly).</summary>
+        private void UpdateCheckTick()
+        {
+            // Cheap no-op until the weekly update check is due. Memory is trimmed on idle/minimize, not here.
+            Updater.StartBackgroundCheck();
+        }
+
+        private async Task IdleMonitorTickAsync()
+        {
+            bool nowIdle = GetSystemIdleMilliseconds() >= IdleCacheCheckMs;
+            if (nowIdle != isSystemIdle)
+            {
+                isSystemIdle = nowIdle;
+                idleMonitorTimer.Interval = nowIdle ? IdlePollWakeMs : IdlePollActiveMs;
+                ApplyBackgroundState();
+                if (nowIdle) TrimProcessMemory();
+            }
+
+            bool eligible = IsEligibleForSilentCacheClean();
+            if (!eligible)
+            {
+                lastIdleCacheCheckUtc = DateTime.MinValue;
+                return;
+            }
+
+            if ((DateTime.UtcNow - lastIdleCacheCheckUtc).TotalMilliseconds >= IdleCacheCheckMs)
+            {
+                lastIdleCacheCheckUtc = DateTime.UtcNow;
+                await IdleCacheCheckTickAsync();
             }
         }
 
-        /// <summary>
-        /// Auto-refresh: web messengers slowly grow in RAM over time. Every 5 minutes we check,
-        /// and reload ONE background account that has been running 3+ hours. The account you
-        /// are looking at is never reloaded.
-        /// </summary>
-        private void AutoRefreshTick()
-        {
-            // Long-running sessions: re-evaluate the weekly update check (cheap no-op until due).
-            Updater.StartBackgroundCheck();
-
-            var due = accounts
-                .Where(a => a.View.CoreWebView2 != null && !IsForeground(a) &&
-                            DateTime.UtcNow - a.LoadedAt >= AutoRefreshAfter)
-                .OrderBy(a => a.LoadedAt)
-                .FirstOrDefault();
-            if (due == null) return;
-
-            due.LoadedAt = DateTime.UtcNow;
-            try { due.View.CoreWebView2.Reload(); } catch { }
-        }
-
-        private const int CacheFloorMB = 300; // a calibrated limit is never set below this
+        private bool checkingIdleCache;
 
         /// <summary>
-        /// Self-calibrating cache limit: once an account has been loaded ~2 minutes (warmed up, bundle cached),
-        /// measure its cache and set its limit to that x2 (never below the floor). Runs once per account until
-        /// a manual Clear cache resets it.
+        /// Periodic 10-minute idle / minimized cache monitor: when the PC has been idle for >= 10 minutes
+        /// OR Messenger Hub has been minimized / hidden in the system tray for >= 10 minutes (checked every
+        /// 10 minutes while either condition holds), measure each profile individually and silently clear +
+        /// refresh only the profile(s) exceeding 200 MB.
         /// </summary>
-        private void CalibrateCacheTick()
+        private async Task IdleCacheCheckTickAsync()
         {
-            if (security == null) return;
-            foreach (var acc in accounts)
+            if (security == null || checkingIdleCache || !IsEligibleForSilentCacheClean()) return;
+            checkingIdleCache = true;
+            try
             {
-                if (acc.Service.AlwaysClearCache) continue; // these clear every exit; no limit to calibrate
-                if (!acc.NeedsCalibration || acc.View.IsDisposed || acc.View.CoreWebView2 == null) continue;
-                if ((DateTime.UtcNow - acc.LoadedAt).TotalSeconds < 120) continue; // let it warm up first
+                const CoreWebView2BrowsingDataKinds cacheKinds = CoreWebView2BrowsingDataKinds.DiskCache;
 
-                long bytes = security.MeasureProfileCache(acc.Id);
-                if (bytes <= 0) continue; // nothing cached yet; try again next tick
+                foreach (var acc in accounts.ToList())
+                {
+                    if (IsDisposed || !IsEligibleForSilentCacheClean()) break;
+                    if (!acc.InitStarted || acc.View.IsDisposed || acc.View.CoreWebView2 == null) continue;
 
-                int mb = (int)(bytes * 2 / (1024 * 1024));
-                if (mb < CacheFloorMB) mb = CacheFloorMB;
-                security.SetCacheLimit(acc.Id, mb);
-                settings.Set("CacheLimit." + acc.Id, mb.ToString());
-                settings.Save(AppPaths.SettingsFile);
-                acc.NeedsCalibration = false;
+                    string accId = acc.Id;
+                    long bytes = await Task.Run(() => security.MeasureProfileCache(accId));
+                    if (bytes <= Security.ProfileCacheLimitBytes) continue;
+                    if (IsDisposed || acc.View.IsDisposed || !IsEligibleForSilentCacheClean()) continue;
+
+                    var core = acc.View.CoreWebView2;
+                    if (core == null) continue;
+
+                    try { await core.Profile.ClearBrowsingDataAsync(cacheKinds); } catch { }
+                    if (IsDisposed || acc.View.IsDisposed) continue;
+
+                    acc.LoadedAt = DateTime.UtcNow;
+                    try { acc.View.CoreWebView2?.Reload(); } catch { }
+                }
+            }
+            finally
+            {
+                checkingIdleCache = false;
             }
         }
 
@@ -1086,7 +2044,7 @@ namespace MessengerHub
             active = acc;
             foreach (var a in accounts)
             {
-                a.View.Visible = a == acc;
+                a.HostControl.Visible = a == acc;
                 a.Button.Active = a == acc;
                 a.Button.Invalidate();
             }
@@ -1095,24 +2053,69 @@ namespace MessengerHub
 
             if (acc != null)
             {
-                acc.View.BringToFront();
+                acc.HostControl.BringToFront();
+                SyncBrowserBar(acc);
                 settings.Set("ActiveAccount", acc.Id);
+                if (env != null && !acc.InitStarted)
+                {
+                    _ = InitAccountAsync(acc);
+                }
+                else if (acc.InitStarted && acc.FirstNavDone.Task.IsCompleted)
+                {
+                    _ = RecoverIfBlankAsync(acc);
+                }
                 try { acc.View.Focus(); } catch { }
+                _ = PollAccountUnreadAsync(acc);
+                _ = Task.Delay(250).ContinueWith(_ =>
+                {
+                    if (!IsDisposed && acc == active)
+                        Invoke((Action)(() => _ = PollAccountUnreadAsync(acc)));
+                });
             }
             UpdateTitle();
+        }
+
+        private async Task RecoverIfBlankAsync(Account acc)
+        {
+            if (acc == null || acc.View.IsDisposed) return;
+            var core = acc.View.CoreWebView2;
+            if (core == null) return;
+            if (!acc.FirstNavDone.Task.IsCompleted) return;
+            if (DateTime.UtcNow - acc.LoadedAt < TimeSpan.FromSeconds(8)) return;
+            if (DateTime.UtcNow - acc.LastRecoverUtc < TimeSpan.FromSeconds(15)) return;
+
+            if (!await IsReady(acc))
+            {
+                acc.LastRecoverUtc = DateTime.UtcNow;
+                try { core.Reload(); } catch { }
+            }
         }
 
         private async Task AddAccountAsync(ServiceType service)
         {
             if (env == null) return;
 
+            string customUrl = null;
+            string accountName;
+            if (service == ServiceType.Custom)
+            {
+                if (!Dialogs.PromptCustomSite(this, out customUrl, out string customName)) return;
+                accountName = string.IsNullOrWhiteSpace(customName)
+                    ? NextCustomName(customUrl)
+                    : customName.Replace(";", ",");
+            }
+            else
+            {
+                accountName = NextName(service);
+            }
+
             string id = service.Key.Substring(0, 2) + "_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-            var acc = CreateAccount(id, service, NextName(service));
+            var acc = CreateAccount(id, service, accountName, customUrl, false);
             acc.IsNew = true; // check it isn't a duplicate once it logs in
-            acc.NeedsCalibration = true; // measure its cache limit after it warms up
             SaveSettings();
             SelectAccount(acc);
             await InitAccountAsync(acc);
+            UpdateIdentityTimerState();
         }
 
         /// <summary>Remove an account without asking (used when a just-added account turns out to be a duplicate).</summary>
@@ -1125,18 +2128,27 @@ namespace MessengerHub
                 try { core.Profile.Delete(); } catch { } // removes the profile folder
             }
 
+            ResetCustomIcon(acc);
             accounts.Remove(acc);
             accountList.Controls.Remove(acc.Button);
-            content.Controls.Remove(acc.View);
+            content.Controls.Remove(acc.HostControl);
             tips.SetToolTip(acc.Button, null);
-            acc.Button.ContextMenuStrip?.Dispose();
+            if (acc.Button?.ContextMenuStrip != null)
+            {
+                activeDropDowns.Remove(acc.Button.ContextMenuStrip);
+                if (activeDropDowns.Count == 0) UnhookMouse();
+                acc.Button.ContextMenuStrip.Dispose();
+            }
             acc.Button.Dispose();
             acc.View.Dispose();
+            acc.Container?.Dispose();
 
-            foreach (var key in new[] { "Name.", "Type.", "Silent.", "Id.", "CacheLimit." }) settings.Remove(key + acc.Id);
+            foreach (var key in new[] { "Name.", "Type.", "Silent.", "Id.", "CacheLimit.", "Url.", "Bar." }) settings.Remove(key + acc.Id);
             SaveSettings();
             if (active == acc) SelectAccount(accounts.FirstOrDefault());
             UpdateTitle();
+            UpdateIdentityTimerState();
+            UpdateUnreadTimerState();
         }
 
         private void RenameAccount(Account acc)
@@ -1171,6 +2183,75 @@ namespace MessengerHub
         }
 
         /// <summary>
+        /// On app launch, the app and its whole WebView2 process tree runs at AboveNormal priority
+        /// for the first minute (re-applied every 3s so processes that spawn mid-startup are covered too),
+        /// then everything drops back to Normal. No admin needed.
+        /// </summary>
+        private void StartStartupPriorityBoost()
+        {
+            ApplyPriorityTree(ProcessPriorityClass.AboveNormal);
+
+            int ticks = 0;
+            startupPriorityTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+            startupPriorityTimer.Tick += (s, e) =>
+            {
+                ticks++;
+                if (ticks >= 20) // 20 * 3s = 60 seconds
+                {
+                    startupPriorityTimer.Stop();
+                    startupPriorityTimer.Dispose();
+                    startupPriorityTimer = null;
+                    ApplyPriorityTree(ProcessPriorityClass.Normal);
+                    return;
+                }
+
+                ApplyPriorityTree(ProcessPriorityClass.AboveNormal);
+            };
+            startupPriorityTimer.Start();
+        }
+
+        private void ApplyPriorityTree(ProcessPriorityClass priority)
+        {
+            try
+            {
+                var cur = Process.GetCurrentProcess();
+                if (cur.PriorityClass != priority) cur.PriorityClass = priority;
+            }
+            catch { }
+
+            if (env != null)
+            {
+                try
+                {
+                    var infos = env.GetProcessInfos();
+                    if (infos != null)
+                    {
+                        foreach (var info in infos)
+                        {
+                            TrySetProcessPriority(info.ProcessId, priority);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void TrySetProcessPriority(int pid, ProcessPriorityClass priority)
+        {
+            try
+            {
+                using (var p = Process.GetProcessById(pid))
+                {
+                    if (!p.HasExited && p.PriorityClass != priority)
+                    {
+                        p.PriorityClass = priority;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// Ad/tracker blocking is always on: set every profile's WebView2 tracking prevention to Strict.
         /// Blocks third-party trackers and ad-network domains (not first-party in-feed sponsored posts).
         /// </summary>
@@ -1195,7 +2276,7 @@ namespace MessengerHub
             await RemoveAccountCore(acc);
         }
 
-        private void SaveSettings()
+        private void SaveSettings(bool immediate = false)
         {
             settings.Set("Accounts", string.Join(";", accounts.Select(a => a.Id)));
             foreach (var a in accounts)
@@ -1204,14 +2285,64 @@ namespace MessengerHub
                 settings.Set("Type." + a.Id, a.Service.Key);
                 settings.Set("Silent." + a.Id, a.Silent ? "1" : "0");
                 if (!string.IsNullOrEmpty(a.Identity)) settings.Set("Id." + a.Id, a.Identity);
+                if (a.IsCustom)
+                {
+                    settings.Set("Url." + a.Id, a.StartUrl);
+                    settings.Set("Bar." + a.Id, a.ShowAddressBar ? "1" : "0");
+                }
             }
-            settings.Save(AppPaths.SettingsFile);
+            if (immediate)
+            {
+                saveDebounceTimer.Stop();
+                settings.Save(AppPaths.SettingsFile);
+            }
+            else
+            {
+                saveDebounceTimer.Stop();
+                saveDebounceTimer.Start();
+            }
         }
 
         // ------------------------------------------------------------------ Unread counts & notifications
 
-        // Messengers put the unread count in the page title, e.g. "(3) WhatsApp".
-        private static readonly Regex UnreadPattern = new Regex(@"\((\d+)\+?\)");
+        // Messengers put the unread count in the page title, e.g. "(3) WhatsApp", "(*2) Slack", or "* Slack".
+        private static readonly Regex UnreadPattern = new Regex(@"\(\*?(\d+)\+?\)", RegexOptions.Compiled);
+        private static readonly Regex UnreadMarkerPattern = new Regex(@"(?:^\s*|[\|\-]\s*)[\*•●!]|[\*•●!]\s*(?:Slack|[A-Z])", RegexOptions.Compiled);
+
+        private void UpdateUnreadTimerState()
+        {
+            bool anyNeedsPoll = accounts.Any(a =>
+                !a.View.IsDisposed && a.InitStarted && a.Service.UnreadScript != null);
+
+            if (anyNeedsPoll)
+            {
+                if (!unreadTimer.Enabled) unreadTimer.Start();
+            }
+            else
+            {
+                if (unreadTimer.Enabled) unreadTimer.Stop();
+            }
+        }
+
+        private async Task PollAccountUnreadAsync(Account acc)
+        {
+            if (acc == null || !acc.InitStarted || acc.View.IsDisposed) return;
+            var script = acc.Service.UnreadScript;
+            if (script == null) return;
+            var core = acc.View.CoreWebView2;
+            if (core == null) return;
+            try
+            {
+                string r = await core.ExecuteScriptAsync(script);
+                if (int.TryParse((r ?? "").Trim('"'), out int n) && n >= 0 && n != acc.Unread)
+                {
+                    acc.Unread = n;
+                    RefreshButton(acc);
+                    UpdateTitle();
+                }
+            }
+            catch { /* page not ready / account removed */ }
+        }
 
         /// <summary>
         /// For services whose tab title doesn't carry the unread count (e.g. Telegram), read it from
@@ -1219,34 +2350,34 @@ namespace MessengerHub
         /// </summary>
         private async Task UnreadPollAsync()
         {
-            foreach (var acc in accounts.ToList())
+            for (int i = 0; i < accounts.Count; i++)
             {
-                if (acc.View.IsDisposed) continue;
-                var script = acc.Service.UnreadScript;
-                if (script == null) continue;
-                var core = acc.View.CoreWebView2;
-                if (core == null) continue;
-                try
-                {
-                    string r = await core.ExecuteScriptAsync(script);
-                    if (int.TryParse((r ?? "").Trim('"'), out int n) && n >= 0 && n != acc.Unread)
-                    {
-                        acc.Unread = n;
-                        RefreshButton(acc);
-                        UpdateTitle();
-                    }
-                }
-                catch { /* page not ready / account removed */ }
+                await PollAccountUnreadAsync(accounts[i]);
             }
         }
 
         private void UpdateUnread(Account acc, string title)
         {
-            // Services with a DOM-based unread reader are driven by UnreadPollAsync, not the tab title.
-            if (acc.Service.UnreadScript != null) return;
-
             var m = UnreadPattern.Match(title ?? "");
-            acc.Unread = m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
+            int titleUnread = m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
+            if (titleUnread == 0 && !string.IsNullOrEmpty(title) && UnreadMarkerPattern.IsMatch(title))
+                titleUnread = 1;
+
+            if (acc.Service.UnreadScript != null)
+            {
+                // When document.title shows unread activity while backgrounded, update immediately so badges respond without latency.
+                if (!IsForeground(acc) && titleUnread > 0 && titleUnread != acc.Unread)
+                {
+                    acc.Unread = titleUnread;
+                    RefreshButton(acc);
+                    UpdateTitle();
+                }
+                _ = PollAccountUnreadAsync(acc);
+                return;
+            }
+
+            if (titleUnread == acc.Unread) return;
+            acc.Unread = titleUnread;
             RefreshButton(acc);
             UpdateTitle();
         }
@@ -1264,6 +2395,7 @@ namespace MessengerHub
             tray.Text = trayText.Length > 63 ? trayText.Substring(0, 63) : trayText;
 
             UpdateTrayIcon(total > 0);
+            UpdateTaskbarOverlay(total);
         }
 
         // Picks the tray icon for the current state: red dot if unread, crescent moon if globally silent.
@@ -1273,6 +2405,77 @@ namespace MessengerHub
             if (idx == trayIconIndex || trayIcons[idx] == null) return;
             trayIconIndex = idx;
             tray.Icon = trayIcons[idx];
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (WM_TASKBARBUTTONCREATED != 0 && (uint)m.Msg == WM_TASKBARBUTTONCREATED)
+            {
+                UpdateTaskbarOverlay(accounts.Sum(a => a.Unread), true);
+            }
+        }
+
+        private static IntPtr MakeTaskbarOverlayHIcon(string text)
+        {
+            try
+            {
+                int size = Math.Max(16, SystemInformation.SmallIconSize.Width);
+                using (var bmp = new Bitmap(size, size))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    using (var bg = new SolidBrush(Color.FromArgb(234, 67, 53)))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                        g.FillEllipse(bg, 0, 0, size - 1, size - 1);
+
+                        float fontPx = text.Length == 1 ? size * 0.68f : (text.Length == 2 ? size * 0.54f : size * 0.44f);
+                        using (var font = new Font("Segoe UI", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                        {
+                            g.DrawString(text, font, Brushes.White, new RectangleF(0, 0, size, size), sf);
+                        }
+                    }
+                    return bmp.GetHicon();
+                }
+            }
+            catch { return IntPtr.Zero; }
+        }
+
+        private void UpdateTaskbarOverlay(int total, bool force = false)
+        {
+            if (!Visible || !IsHandleCreated || IsDisposed) return;
+            string badge = total <= 0 ? "" : (total > 99 ? "99+" : total.ToString());
+            if (!force && badge == lastTaskbarBadge) return;
+
+            try
+            {
+                if (taskbarList == null)
+                {
+                    var inst = (ITaskbarList3)new TaskbarListInstance();
+                    if (inst.HrInit() < 0) return;
+                    taskbarList = inst;
+                }
+
+                if (badge != lastTaskbarBadge)
+                {
+                    if (taskbarBadgeHIcon != IntPtr.Zero)
+                    {
+                        DestroyIcon(taskbarBadgeHIcon);
+                        taskbarBadgeHIcon = IntPtr.Zero;
+                    }
+                    if (badge.Length > 0)
+                    {
+                        taskbarBadgeHIcon = MakeTaskbarOverlayHIcon(badge);
+                    }
+                    lastTaskbarBadge = badge;
+                }
+
+                taskbarList.SetOverlayIcon(Handle, taskbarBadgeHIcon,
+                    badge.Length > 0 ? total + " unread" : null);
+            }
+            catch { }
         }
 
         // Notifications are left to each messenger and the browser engine (native, with preview and
@@ -1290,10 +2493,11 @@ namespace MessengerHub
                 return;
             }
 
+            SetEfficiencyMode(false);
             if (!resetting)
             {
                 settings.CaptureFrom(this);
-                SaveSettings();
+                SaveSettings(true);
             }
             tray.Visible = false;
         }
@@ -1301,8 +2505,9 @@ namespace MessengerHub
         private void HideToTray()
         {
             settings.CaptureFrom(this);
-            SaveSettings();
+            SaveSettings(true);
             Hide();
+            TrimProcessMemory();
 
             if (settings.Get("TrayHintShown") != "1")
             {
@@ -1331,7 +2536,7 @@ namespace MessengerHub
 
         private async Task ClearCacheAsync()
         {
-            long before = FolderSize(AppPaths.Data);
+            long before = await Task.Run(() => FolderSize(AppPaths.Data));
 
             if (!Dialogs.ConfirmClearCache(this, FormatSize(before)))
                 return;
@@ -1339,10 +2544,8 @@ namespace MessengerHub
             UseWaitCursor = true;
             try
             {
-                // Cached media lives in the HTTP cache and Cache Storage.
-                // Logins live in IndexedDB/cookies, which we don't touch.
+                // Cached media lives in the HTTP disk cache; logins/Service Workers are never touched.
                 var kinds = CoreWebView2BrowsingDataKinds.DiskCache |
-                            CoreWebView2BrowsingDataKinds.CacheStorage |
                             CoreWebView2BrowsingDataKinds.DownloadHistory;
 
                 foreach (var acc in accounts.ToList())
@@ -1351,15 +2554,6 @@ namespace MessengerHub
                     if (core == null) continue;
                     try { await core.Profile.ClearBrowsingDataAsync(kinds); } catch { }
                 }
-
-                // Cache was wiped, so re-measure each account's limit after the next warm-up.
-                foreach (var acc in accounts)
-                {
-                    acc.NeedsCalibration = true;
-                    settings.Remove("CacheLimit." + acc.Id);
-                    security?.SetCacheLimit(acc.Id, acc.Service.CacheLimitMB);
-                }
-                settings.Save(AppPaths.SettingsFile);
 
                 foreach (var acc in accounts) { acc.LoadedAt = DateTime.UtcNow; acc.View.CoreWebView2?.Reload(); }
 
@@ -1370,7 +2564,7 @@ namespace MessengerHub
                 UseWaitCursor = false;
             }
 
-            long after = FolderSize(AppPaths.Data);
+            long after = await Task.Run(() => FolderSize(AppPaths.Data));
             MessageBox.Show(this,
                 "Cache cleared. Your logins were kept.\n\n" +
                 "Data folder: " + FormatSize(before) + "  ->  " + FormatSize(after),
@@ -1408,11 +2602,12 @@ namespace MessengerHub
         // but only for the account's own site.
         private void OnPermissionRequested(Account acc, CoreWebView2PermissionRequestedEventArgs e)
         {
-            if (!acc.Service.Owns(e.Uri)) return;
+            if (!acc.OwnsUrl(e.Uri)) return;
 
             switch (e.PermissionKind)
             {
                 case CoreWebView2PermissionKind.Notifications:
+                case CoreWebView2PermissionKind.PersistentStorage:
                 case CoreWebView2PermissionKind.Microphone:
                 case CoreWebView2PermissionKind.Camera:
                 case CoreWebView2PermissionKind.ClipboardRead:
@@ -1428,7 +2623,7 @@ namespace MessengerHub
             // A real third-party link (a concrete web URL that isn't this service or a sign-in provider)
             // opens in the default browser. Everything else from a pop-up-capable service — its own site,
             // sign-in providers, and the blank/handoff windows OAuth uses — stays in-app so SSO can finish.
-            bool externalLink = IsWebUrl(e.Uri) && !acc.Service.Owns(e.Uri) && !IsAuthDomain(e.Uri);
+            bool externalLink = IsWebUrl(e.Uri) && !acc.OwnsUrl(e.Uri) && !IsAuthDomain(e.Uri);
             if (acc.Service.AllowPopups && !externalLink)
             {
                 var deferral = e.GetDeferral();
@@ -1454,6 +2649,11 @@ namespace MessengerHub
             {
                 var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = ContentColor };
                 form.Controls.Add(view);
+                form.FormClosed += (s, a) =>
+                {
+                    try { view.Dispose(); } catch { }
+                    try { form.Dispose(); } catch { }
+                };
                 form.Show();
 
                 var options = env.CreateCoreWebView2ControllerOptions();
@@ -1550,6 +2750,9 @@ namespace MessengerHub
             "appleid.apple.com", "idmsa.apple.com",
             "login.microsoftonline.com", "login.microsoft.com", "login.live.com",
             "github.com",
+            "auth0.com", "okta.com", "oktapreview.com", "onelogin.com",
+            "duosecurity.com", "cloudflareaccess.com", "challenges.cloudflare.com",
+            "arkoselabs.com", "withpersona.com", "recaptcha.net", "hcaptcha.com"
         };
 
         private static bool IsAuthDomain(string uri)
@@ -1583,9 +2786,11 @@ namespace MessengerHub
             long total = 0;
             try
             {
-                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                var di = new DirectoryInfo(path);
+                if (!di.Exists) return 0;
+                foreach (var fi in di.EnumerateFiles("*", SearchOption.AllDirectories))
                 {
-                    try { total += new FileInfo(f).Length; } catch { }
+                    try { total += fi.Length; } catch { }
                 }
             }
             catch { }

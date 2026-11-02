@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.19 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
+MESSENGER HUB  v0.20 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
 =============================================================
 
 INSTALL (easiest)
@@ -37,16 +37,17 @@ USING IT
     tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).
   - The tray icon shows a red dot (top-right) whenever any account has an unread message.
   - The X button hides the app to the system tray. Tray icon > right-click > Exit to quit.
-  - Saving RAM/CPU: background accounts use low-memory mode, refresh themselves every
-    3 hours, and videos/GIFs only play when you click them.
-  - Faster startup: for the first minute after launch the app and its browser processes run
-    at AboveNormal priority, then drop back to Normal.
-  - Cache stays bounded on its own: the app measures each account's cache after a 2-minute
-    warm-up and sets that account's limit to about twice that size (never below 300 MB). On
-    exit, an account over its limit has its media cache cleared (app files and logins are kept).
-    It re-measures after a manual Clear cache. Nothing to configure.
-    (Full-website tiles like LinkedIn always clear their media cache on exit, since they
-    are used occasionally and their cache grows fast; logins are still kept.)
+  - Saving RAM/CPU: background accounts use low-memory mode, compact their memory every
+    10 minutes, and videos/GIFs only play when you click them. When the app is hidden or
+    minimized, it also runs in Windows efficiency mode.
+  - Cache stays bounded on its own: every account's media cache is limited to 200 MB.
+    If the PC has been idle for 10 minutes, or the app has been minimized or in the tray
+    for 10 minutes, an account over the limit has its cache cleared and its page reloaded.
+    On exit, any account over the limit has its cache cleared. Logins are always kept.
+    Nothing to configure.
+  - Custom websites: "Custom..." in the + menu adds any website as a tile. Each custom
+    tile has a small address bar (back, forward, address). Hide or show it from the
+    tile's right-click menu.
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
 

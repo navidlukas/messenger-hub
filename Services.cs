@@ -21,8 +21,7 @@ namespace MessengerHub
         public string IdentityScript; // returns the logged-in phone number / name, or null (auto-naming)
         public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
         public string ReadyScript;    // returns 'true' when the page is usable; null = fall back to a text check
-        public int CacheLimitMB = 300; // clear this account's media cache on exit once it passes this size
-        public bool AlwaysClearCache; // full-website tiles: clear the media cache on every exit (no calibration)
+        public bool SuspendInBackground; // heavy full-site tiles: suspend execution when in background
 
         public static readonly ServiceType WhatsApp = new ServiceType
         {
@@ -60,19 +59,7 @@ namespace MessengerHub
             AllowPopups = true,
             IconPage = "/messages", // the Facebook login page shows the Facebook icon instead
             IdentityScript = Scripts.FacebookName,
-            AlwaysClearCache = true, // loads the full Facebook site (feed/reels/ads): a browsing tile
-        };
-
-        // WeChat Web works by QR scan, but only for accounts Tencent allows — some accounts get
-        // "WeChat Web Service Unavailable for This Account" and must use the WeChat desktop app instead.
-        public static readonly ServiceType WeChat = new ServiceType
-        {
-            Key = "wechat",
-            Name = "WeChat",
-            Url = "https://web.wechat.com/",
-            Domains = new[] { "wechat.com", "weixin.qq.com", "qq.com" },
-            Color = Color.FromArgb(7, 193, 96),
-            Letter = "C",
+            UnreadScript = Scripts.MessengerUnread,
         };
 
         // Google Messages for web: QR-paired with the phone, which must stay online (it relays texts).
@@ -97,10 +84,9 @@ namespace MessengerHub
             Domains = new[] { "slack.com", "slack-edge.com", "slack-msgs.com", "slackb.com" },
             Color = Color.FromArgb(74, 21, 75),
             Letter = "S",
-            // Its heavy part is the app shell, which we keep (not trimmed), so the default 300 is plenty;
-            // calibration adjusts it anyway.
             AllowPopups = true, // let Slack's SSO sign-in popups open inside the app
             UnreadScript = Scripts.SlackUnread, // its tab title doesn't carry the unread count reliably
+            ReadyScript = Scripts.SlackReady,
         };
 
         // LinkedIn: not a pure messenger, but it has DMs and you stay logged in across restarts
@@ -109,18 +95,33 @@ namespace MessengerHub
         {
             Key = "linkedin",
             Name = "LinkedIn",
-            Url = "https://www.linkedin.com/feed/",
+            Url = "https://www.linkedin.com/messaging/",
             Domains = new[] { "linkedin.com", "licdn.com" },
             Color = Color.FromArgb(10, 102, 194),
             Letter = "L",
             UnreadScript = Scripts.LinkedInUnread,
-            AlwaysClearCache = true, // heavy full site, used occasionally: don't let its media cache linger
+            SuspendInBackground = true, // freeze background timers and feed execution while in background
         };
 
-        public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, WeChat, GoogleMessages, Slack, LinkedIn };
+        // Custom website: any web app or site in its own persistent, encrypted profile, pinned to its base domain.
+        public static readonly ServiceType Custom = new ServiceType
+        {
+            Key = "custom",
+            Name = "Custom",
+            Url = "https://www.google.com/",
+            Domains = Array.Empty<string>(),
+            Color = Color.FromArgb(100, 116, 139),
+            Letter = "C",
+            AllowPopups = true, // let SSO/OAuth sign-in popups open inside the app with the same login
+        };
 
-        public static ServiceType ByKey(string key) =>
-            All.FirstOrDefault(s => s.Key.Equals(key ?? "", StringComparison.OrdinalIgnoreCase)) ?? WhatsApp;
+        public static readonly ServiceType[] All = { WhatsApp, Telegram, Messenger, GoogleMessages, Slack, LinkedIn, Custom };
+
+        public static ServiceType ByKey(string key)
+        {
+            if (string.Equals(key, "wechat", StringComparison.OrdinalIgnoreCase)) return Custom;
+            return All.FirstOrDefault(s => s.Key.Equals(key ?? "", StringComparison.OrdinalIgnoreCase)) ?? WhatsApp;
+        }
 
         /// <summary>Does this URL belong to the service (so it may load inside the app)?</summary>
         public bool Owns(string uri)
@@ -133,9 +134,13 @@ namespace MessengerHub
             return false;
         }
 
+        private Bitmap cachedMenuIcon;
+        private int cachedMenuIconSize;
+
         /// <summary>Small round colored icon with the service letter (for menus).</summary>
         public Bitmap MenuIcon(int size)
         {
+            if (cachedMenuIcon != null && cachedMenuIconSize == size) return cachedMenuIcon;
             var bmp = new Bitmap(size, size);
             using (var g = Graphics.FromImage(bmp))
             using (var brush = new SolidBrush(Color))
@@ -147,6 +152,8 @@ namespace MessengerHub
                 g.FillEllipse(brush, 0, 0, size - 1, size - 1);
                 g.DrawString(Letter, font, Brushes.White, new RectangleF(0, 0, size, size), center);
             }
+            cachedMenuIcon = bmp;
+            cachedMenuIconSize = size;
             return bmp;
         }
     }

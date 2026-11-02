@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.20 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
+MESSENGER HUB  v0.21 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
 =============================================================
 
 INSTALL (easiest)
@@ -47,13 +47,17 @@ USING IT
     Nothing to configure.
   - Custom websites: "Custom..." in the + menu adds any website as a tile. Each custom
     tile has a small address bar (back, forward, address). Hide or show it from the
-    tile's right-click menu.
+    tile's right-click menu. A site hosted under its own subdomain (for example
+    name.github.io or name.vercel.app) is treated as its own site, separate from others.
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
+    It asks first, and the password screen's "Forgot? Reset" asks you to type RESET.
 
 AUTOMATIC UPDATES
   - The app checks for a new version about once a week, in the background. If one is
     found it downloads quietly (into data\update) while you keep working - no pop-ups.
+    Every download is checked against the SHA-256 checksum published with that release;
+    a file that doesn't match is discarded.
   - The new version is installed only when you quit (tray > Exit), or the next time you
     start the app. Your accounts, logins and settings in data\ are never touched.
   - To update on demand, use Menu > Check for updates... It checks right away and, if a
@@ -66,12 +70,14 @@ AUTOMATIC UPDATES
     (keep your data\ folder). After that, updates are hands-off.
 
 PASSWORD & MOVING TO ANOTHER PC
-  - First run asks you to set a password. You enter it each time you START the app
+  - First run asks you to set a password (at least 8 characters). You enter it each time you START the app
     (not when reopening from the tray). There is NO recovery: if you forget it, the
     only option is Reset, which wipes all accounts and starts fresh.
   - While the app is closed, your account logins (cookies, Local Storage, IndexedDB)
     are encrypted with that password. Someone who copies your folder cannot open your
-    accounts or read messages without the password.
+    accounts without the password. Chat media in the browser cache is NOT encrypted:
+    it is cleared when an account's cache is over 200 MB, and you can clear it any time
+    from Menu > Clear cache.
   - Because of this you can copy the whole folder to another PC and it just works:
     logins (including Facebook) survive the move once you enter your password.
   - Protection applies only while the app is CLOSED. While it is running (including in

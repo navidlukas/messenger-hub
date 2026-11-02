@@ -25,6 +25,9 @@ namespace MessengerHub
         public bool InitStarted;                     // true once WebView2 initialization has been started
         public readonly System.Threading.Tasks.TaskCompletionSource<bool> FirstNavDone =
             new System.Threading.Tasks.TaskCompletionSource<bool>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool? SentActive;                     // last "is this tab active" value sent to the page (null = not sent since load)
+        public int IdentityMisses;                   // identity checks that found no logged-in name (for back-off)
+        public DateTime IdentityNextUtc = DateTime.MinValue; // next identity check allowed
         public bool FirstLoadOk;                     // a top-level navigation has succeeded at least once
         public int StartupReloads;                   // auto-reloads used by the startup stuck-load watchdog
         public DateTime LastRecoverUtc = DateTime.MinValue; // last crash-recovery reload (rate limit)
@@ -42,6 +45,17 @@ namespace MessengerHub
         public bool IsCustom => Service == ServiceType.Custom;
         public Control HostControl => (Control)Container ?? View;
         public string StartUrl => IsCustom && !string.IsNullOrEmpty(CustomUrl) ? CustomUrl : Service.Url;
+
+        // Hosting services where every customer gets a subdomain. Each customer is its own "site",
+        // so a custom tile never treats another customer's pages as its own.
+        private static readonly System.Collections.Generic.HashSet<string> PrivateSuffixes =
+            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
+                "herokuapp.com", "azurewebsites.net", "web.app", "firebaseapp.com", "appspot.com",
+                "onrender.com", "fly.dev", "glitch.me", "replit.dev", "surge.sh", "ngrok.io",
+                "blogspot.com", "wixsite.com", "squarespace.com", "myshopify.com"
+            };
 
         private static readonly System.Collections.Generic.HashSet<string> SecondLevelTlds =
             new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -73,6 +87,7 @@ namespace MessengerHub
             string[] parts = h.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length <= 2) return h;
             int n = parts.Length;
+            if (n >= 2 && PrivateSuffixes.Contains(parts[n - 2] + "." + parts[n - 1])) return h;
             if (parts[n - 1].Length == 2 && SecondLevelTlds.Contains(parts[n - 2]))
                 return parts[n - 3] + "." + parts[n - 2] + "." + parts[n - 1];
             return parts[n - 2] + "." + parts[n - 1];

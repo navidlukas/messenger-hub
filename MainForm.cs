@@ -889,6 +889,11 @@ namespace MessengerHub
                         AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     break;
 
+                case Updater.CheckResult.Busy:
+                    MessageBox.Show(this, "An update check is already running. Try again in a moment.",
+                        AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    break;
+
                 default:
                     MessageBox.Show(this,
                         "Couldn't check for updates right now.\nCheck your internet connection and try again.",
@@ -1324,6 +1329,7 @@ namespace MessengerHub
             {
                 if (!acc.InitStarted || acc.View.IsDisposed) continue;   // not started or removed meanwhile
                 if (!string.IsNullOrEmpty(acc.Identity)) continue;        // already identified
+                if (DateTime.UtcNow < acc.IdentityNextUtc) continue;      // backing off while logged out
                 if (string.IsNullOrEmpty(acc.Service.IdentityScript)) continue; // service has no identity
                 var core = acc.View.CoreWebView2;
                 if (core == null) continue;
@@ -1334,7 +1340,14 @@ namespace MessengerHub
                     string found = DecodeJsonString(await core.ExecuteScriptAsync(acc.Service.IdentityScript));
                     found = (found ?? "").Replace(";", ",").Replace("\r", " ").Replace("\n", " ").Trim();
                     if (found.Length > 40) found = found.Substring(0, 40).Trim();
-                    if (found.Length == 0 || !accounts.Contains(acc)) continue; // not logged in yet; try next tick
+                    if (!accounts.Contains(acc)) continue;
+                    if (found.Length == 0)
+                    {
+                        // Not logged in yet: check again later, backing off up to one minute.
+                        acc.IdentityMisses++;
+                        acc.IdentityNextUtc = DateTime.UtcNow.AddSeconds(Math.Min(60, 10 * Math.Pow(2, Math.Min(acc.IdentityMisses, 3))));
+                        continue;
+                    }
 
                     // Block a just-added account that is the same account as one already here.
                     if (acc.IsNew)
@@ -1770,6 +1783,7 @@ namespace MessengerHub
                 core.NavigationCompleted += (s, e) =>
                 {
                     acc.IdleBgApplied = false;
+                    acc.SentActive = null; // a new page has no state yet: send the flag again
                     SyncBrowserBar(acc);
                     if (e.IsSuccess)
                     {
@@ -1951,7 +1965,11 @@ namespace MessengerHub
                 }
                 catch { }
 
-                try { _ = core.ExecuteScriptAsync("window.__mhActive = " + (fg ? "true" : "false") + ";"); } catch { }
+                if (a.SentActive != fg)
+                {
+                    a.SentActive = fg;
+                    try { _ = core.ExecuteScriptAsync("window.__mhActive = " + (fg ? "true" : "false") + ";"); } catch { }
+                }
 
                 ApplyIdlePageFreeze(a, isSystemIdle && visibleActive);
 
@@ -2358,7 +2376,7 @@ namespace MessengerHub
         {
             var m = UnreadPattern.Match(title ?? "");
             int titleUnread = m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
-            if (titleUnread == 0 && !string.IsNullOrEmpty(title) && UnreadMarkerPattern.IsMatch(title))
+            if (titleUnread == 0 && acc.Service == ServiceType.Slack && !string.IsNullOrEmpty(title) && UnreadMarkerPattern.IsMatch(title))
                 titleUnread = 1;
 
             if (acc.Service.UnreadScript != null)
@@ -2584,6 +2602,7 @@ namespace MessengerHub
             // so we flag the reset, restart, and the new copy deletes it on startup.
             try { File.WriteAllText(AppPaths.ResetFlag, "reset"); } catch { }
             resetting = true;
+            Program.ResetInProgress = true;
 
             try
             {
@@ -2744,10 +2763,9 @@ namespace MessengerHub
         // ("Sign in with Google/Apple/Microsoft/GitHub") can complete without leaving the app.
         private static readonly string[] AuthDomains =
         {
-            "accounts.google.com", "accounts.youtube.com", "googleusercontent.com",
+            "accounts.google.com", "accounts.youtube.com",
             "appleid.apple.com", "idmsa.apple.com",
             "login.microsoftonline.com", "login.microsoft.com", "login.live.com",
-            "github.com",
             "auth0.com", "okta.com", "oktapreview.com", "onelogin.com",
             "duosecurity.com", "cloudflareaccess.com", "challenges.cloudflare.com",
             "arkoselabs.com", "withpersona.com", "recaptcha.net", "hcaptcha.com"

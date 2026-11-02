@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,7 +46,7 @@ namespace MessengerHub
         /// <summary>Set before exit when a staged update should be installed AND the app relaunched.</summary>
         public static bool RequestRelaunchOnExit;
 
-        public enum CheckResult { UpToDate, Ready, Failed }
+        public enum CheckResult { UpToDate, Ready, Failed, Busy }
 
         private static readonly HttpClient http = CreateClient();
 
@@ -97,7 +98,7 @@ namespace MessengerHub
         public static CheckResult CheckNow()
         {
             if (Interlocked.Exchange(ref running, 1) == 1)         // a check is already running
-                return HasPendingUpdate() ? CheckResult.Ready : CheckResult.UpToDate;
+                return HasPendingUpdate() ? CheckResult.Ready : CheckResult.Busy;
             try
             {
                 Directory.CreateDirectory(UpdateDir);
@@ -124,13 +125,25 @@ namespace MessengerHub
             if (latest == null) return CheckResult.Failed;
             if (latest <= CurrentVersion) return CheckResult.UpToDate;
 
-            string url = FindZipAsset(json);
+            string url = FindAssetUrl(json, ".zip");
             if (url == null) { Log("no .zip asset in latest release"); return CheckResult.Failed; }
+
+            // Every release publishes a SHA-256 checksum next to the zip. No checksum means no install.
+            string sumUrl = FindAssetUrl(json, ".zip.sha256");
+            if (sumUrl == null) { Log("no checksum asset in latest release; update refused"); return CheckResult.Failed; }
+            string expected = ParseSha256(HttpGet(sumUrl));
+            if (expected == null) { Log("checksum file unreadable; update refused"); return CheckResult.Failed; }
 
             SafeDelete(DownloadDir);
             Directory.CreateDirectory(DownloadDir);
             string zipPath = Path.Combine(DownloadDir, "update.zip");
             if (!Download(url, zipPath)) { SafeDelete(DownloadDir); return CheckResult.Failed; }
+            if (Sha256File(zipPath) != expected)
+            {
+                Log("checksum mismatch; update discarded");
+                SafeDelete(DownloadDir);
+                return CheckResult.Failed;
+            }
 
             string staged = Path.Combine(StagedRoot, latest.ToString());
             SafeDelete(staged);
@@ -247,14 +260,29 @@ namespace MessengerHub
             return m.Success ? m.Groups[1].Value : null;
         }
 
-        private static string FindZipAsset(string json)
+        private static string FindAssetUrl(string json, string suffix)
         {
             foreach (Match m in Regex.Matches(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\""))
             {
                 string u = m.Groups[1].Value;
-                if (u.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) return u;
+                if (u.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return u;
             }
             return null;
+        }
+
+        /// <summary>Reads the hash from a "hash  filename" checksum file. Returns null if it isn't a SHA-256.</summary>
+        private static string ParseSha256(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            string token = text.Trim().Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            return token != null && Regex.IsMatch(token, "^[0-9a-fA-F]{64}$") ? token.ToLowerInvariant() : null;
+        }
+
+        private static string Sha256File(string path)
+        {
+            using (var sha = SHA256.Create())
+            using (var fs = File.OpenRead(path))
+                return BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
         }
 
         private static Version Normalize(Version v)
@@ -349,6 +377,8 @@ namespace MessengerHub
             try
             {
                 Directory.CreateDirectory(UpdateDir);
+                var old = new FileInfo(LogFile);
+                if (old.Exists && old.Length > 512 * 1024) old.Delete(); // keep the log small
                 File.AppendAllText(LogFile, DateTime.Now.ToString("s") + "  " + msg + Environment.NewLine);
             }
             catch { }

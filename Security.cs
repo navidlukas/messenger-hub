@@ -140,6 +140,11 @@ namespace MessengerHub
         /// </summary>
         public void LockProfiles()
         {
+            // Let any restore still running finish first, so half-restored data is never encrypted.
+            Task[] pending;
+            lock (unlockTasks) pending = unlockTasks.Values.ToArray();
+            try { if (pending.Length > 0) Task.WaitAll(pending, 60000); } catch { }
+
             Parallel.ForEach(ProfileDirs().ToList(), profile =>
             {
                 foreach (var rel in DirTargets) LockDir(profile, rel);
@@ -245,6 +250,12 @@ namespace MessengerHub
             string sigPath = lockPath + ".sig";
             try
             {
+                if (!Directory.EnumerateFileSystemEntries(src).Any())
+                {
+                    // Nothing to protect (never re-encrypt an empty folder over a good lock file).
+                    TryDeleteDir(src);
+                    return;
+                }
                 string sig = Signature(src, true);
                 if (Unchanged(sigPath, lockPath, sig))
                 {
@@ -272,23 +283,30 @@ namespace MessengerHub
             string src = Path.Combine(profile, rel);
             string lockPath = src + ".mhd";
             string sigPath = lockPath + ".sig";
+            string tmp = src + ".restore";
             if (!File.Exists(lockPath)) return;
 
-            // Plain copy already present: keep it as-is without touching or deleting the encrypted lock file.
+            // A restore that never finished leaves only this temporary folder: discard it.
+            TryDeleteDir(tmp);
+
+            // Plain copy already present (restored earlier, not yet locked again): keep it.
             if (Directory.Exists(src) && Directory.EnumerateFileSystemEntries(src).Any()) return;
+            TryDeleteDir(src); // an empty leftover folder
 
             for (int attempt = 0; attempt < 3; attempt++)
             {
                 try
                 {
-                    Directory.CreateDirectory(src);
-                    if (!Crypto.DecryptDirectory(lockPath, src, master)) return; // keep the lock file; don't lose data
-                    // Keep the lock file: if nothing changes this session, LockDir reuses it. Record the restored state.
+                    // Restore into a temporary folder and move it into place only when it is complete,
+                    // so an interrupted or failed restore can never look like a finished one.
+                    if (!Crypto.DecryptDirectory(lockPath, tmp, master)) { TryDeleteDir(tmp); return; } // keep the lock file
+                    Directory.Move(tmp, src);
                     WriteText(sigPath, Signature(src, true));
                     return;
                 }
                 catch
                 {
+                    TryDeleteDir(tmp);
                     if (attempt < 2) System.Threading.Thread.Sleep(50);
                 }
             }
@@ -302,6 +320,12 @@ namespace MessengerHub
             string sigPath = lockPath + ".sig";
             try
             {
+                if (new FileInfo(src).Length == 0)
+                {
+                    // Empty file: keep the existing lock file rather than replacing it with nothing.
+                    if (File.Exists(lockPath)) File.Delete(src);
+                    return;
+                }
                 string sig = Signature(src, false);
                 if (Unchanged(sigPath, lockPath, sig)) { File.Delete(src); return; } // unchanged: reuse
 
@@ -357,7 +381,7 @@ namespace MessengerHub
         {
             try
             {
-                if (File.Exists(AppPaths.CookieKeyFile)) return; // already have it
+                // Refreshed on every exit, because the browser can rotate its key.
                 byte[] raw = ReadCookieKey();
                 if (raw == null) return;
                 SafeWrite(AppPaths.CookieKeyFile, Crypto.Encrypt(raw, master));
@@ -447,7 +471,8 @@ namespace MessengerHub
             lock (browserPids) rootPids = browserPids.ToArray();
             if (rootPids.Length == 0) return;
 
-            var targetPids = new HashSet<int>(rootPids);
+            // One snapshot of (pid, parent pid) for the whole system.
+            var links = new List<KeyValuePair<int, int>>();
             IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if (snap != IntPtr.Zero && snap != (IntPtr)(-1))
             {
@@ -458,8 +483,7 @@ namespace MessengerHub
                     {
                         do
                         {
-                            if (targetPids.Contains((int)pe.th32ParentProcessID))
-                                targetPids.Add((int)pe.th32ProcessID);
+                            links.Add(new KeyValuePair<int, int>((int)pe.th32ProcessID, (int)pe.th32ParentProcessID));
                         }
                         while (Process32Next(snap, ref pe));
                     }
@@ -467,6 +491,22 @@ namespace MessengerHub
                 finally
                 {
                     CloseHandle(snap);
+                }
+            }
+
+            // Repeat until nothing new is added, so grandchildren are found whatever order the snapshot is in.
+            var targetPids = new HashSet<int>(rootPids);
+            bool grew = true;
+            while (grew)
+            {
+                grew = false;
+                foreach (var link in links)
+                {
+                    if (!targetPids.Contains(link.Key) && targetPids.Contains(link.Value))
+                    {
+                        targetPids.Add(link.Key);
+                        grew = true;
+                    }
                 }
             }
 
@@ -521,8 +561,17 @@ namespace MessengerHub
                 fs.Write(bytes, 0, bytes.Length);
                 fs.Flush(true);
             }
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(tmp, path);
+            try
+            {
+                if (File.Exists(path)) File.Replace(tmp, path, null); // one step: the old file stays valid until the new one is complete
+                else File.Move(tmp, path);
+            }
+            catch
+            {
+                // Some file systems (e.g. some USB sticks) don't support Replace.
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+            }
         }
 
         private static void WriteText(string path, string text)

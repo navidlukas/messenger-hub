@@ -188,6 +188,7 @@ namespace MessengerHub
             byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
             long len = new FileInfo(src).Length;
             if (len < IvLen + TagLen) return false;
+            if (!VerifyFile(src, key64)) return false; // no plaintext is written unless the MAC is correct
 
             try
             {
@@ -303,9 +304,11 @@ namespace MessengerHub
                         var buf = GetBuffer();
                         foreach (var entry in zip.Entries)
                         {
+                            string dirPath = Path.GetFullPath(Path.Combine(fullDestDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
                             if (string.IsNullOrEmpty(entry.Name) && entry.FullName.EndsWith("/"))
                             {
-                                Directory.CreateDirectory(Path.Combine(fullDestDir, entry.FullName));
+                                if (dirPath.StartsWith(fullDestDir, StringComparison.OrdinalIgnoreCase))
+                                    Directory.CreateDirectory(dirPath);
                                 continue;
                             }
                             string destFile = Path.GetFullPath(Path.Combine(fullDestDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));

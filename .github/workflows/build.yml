@@ -45,6 +45,13 @@ jobs:
         run: |
           Compress-Archive -Path dist/MessengerHub/* -DestinationPath MessengerHub-${{ steps.ver.outputs.version }}.zip -Force
 
+      - name: Write SHA-256 checksum for the zip
+        shell: pwsh
+        run: |
+          $zip = "MessengerHub-${{ steps.ver.outputs.version }}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "$hash  $zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii -NoNewline
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
@@ -62,4 +69,5 @@ jobs:
           files: |
             MessengerHub-Setup-${{ steps.ver.outputs.version }}.exe
             MessengerHub-${{ steps.ver.outputs.version }}.zip
+            MessengerHub-${{ steps.ver.outputs.version }}.zip.sha256
           fail_on_unmatched_files: true

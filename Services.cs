@@ -21,7 +21,6 @@ namespace MessengerHub
         public string IdentityScript; // returns the logged-in phone number / name, or null (auto-naming)
         public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
         public string ReadyScript;    // returns 'true' when the page is usable; null = fall back to a text check
-        public bool SuspendInBackground; // heavy full-site tiles: suspend execution when in background
 
         public static readonly ServiceType WhatsApp = new ServiceType
         {
@@ -68,8 +67,9 @@ namespace MessengerHub
             Key = "gmessages",
             Name = "Google Messages",
             Url = "https://messages.google.com/web",
-            // Google sign-in / account setup bounces across several Google hosts; allow them in-app.
-            Domains = new[] { "messages.google.com", "google.com", "gstatic.com", "googleusercontent.com", "googleapis.com" },
+            // Only the messenger's own host: it gets notification/camera/microphone permissions.
+            // Google sign-in (accounts.google.com) is allowed in-app through the sign-in list in MainForm.
+            Domains = new[] { "messages.google.com" },
             Color = Color.FromArgb(26, 115, 232),
             Letter = "G",
             AllowPopups = true, // let Google's sign-in/consent popups open inside the app, not the external browser
@@ -100,7 +100,6 @@ namespace MessengerHub
             Color = Color.FromArgb(10, 102, 194),
             Letter = "L",
             UnreadScript = Scripts.LinkedInUnread,
-            SuspendInBackground = true, // freeze background timers and feed execution while in background
         };
 
         // Custom website: any web app or site in its own persistent, encrypted profile, pinned to its base domain.

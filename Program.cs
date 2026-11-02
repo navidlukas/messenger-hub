@@ -9,6 +9,9 @@ namespace MessengerHub
 {
     internal static class Program
     {
+        // Set when the user chose Reset: the data is about to be deleted, so exit skips re-encrypting it.
+        internal static volatile bool ResetInProgress;
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -29,7 +32,7 @@ namespace MessengerHub
             bool resetRequested = args.Any(a => a.Equals("--reset", StringComparison.OrdinalIgnoreCase));
 
             // One running copy per app folder (copies in different folders can run side by side).
-            string id = AppPaths.Root.ToLowerInvariant().GetHashCode().ToString("X8");
+            string id = StableHash(AppPaths.Root.ToLowerInvariant());
             using (var mutex = new Mutex(false, "MessengerHub_" + id))
             using (var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "MessengerHub_Show_" + id))
             {
@@ -105,9 +108,12 @@ namespace MessengerHub
 
                     // Closed for good: wait for the browser to exit, trim oversized caches, then re-lock.
                     security.WaitForBrowsers();
-                    security.CaptureCookieKey();
-                    security.TrimCaches();
-                    security.LockProfiles();
+                    if (!ResetInProgress) // a reset deletes everything anyway, so don't spend time re-encrypting it
+                    {
+                        security.CaptureCookieKey();
+                        security.TrimCaches();
+                        security.LockProfiles();
+                    }
 
                     // If a newer build is staged, install it now. Relaunch only when the user asked to
                     // update-and-restart from the menu; a plain quit installs quietly without reopening.
@@ -118,6 +124,17 @@ namespace MessengerHub
                     try { mutex.ReleaseMutex(); } catch { }
                 }
             }
+        }
+
+        /// <summary>
+        /// A hash that is the same in every run (string.GetHashCode is randomized per process on .NET Framework),
+        /// so the single-instance mutex name stays the same between launches.
+        /// </summary>
+        private static string StableHash(string text)
+        {
+            uint h = 2166136261;
+            foreach (char c in text) { h ^= c; h *= 16777619; }
+            return h.ToString("X8");
         }
 
         /// <summary>Delete the whole data folder. Retries while the old browser processes finish closing.</summary>

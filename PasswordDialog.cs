@@ -10,7 +10,7 @@ namespace MessengerHub
     internal static class PasswordDialog
     {
         private const string AppName = "Messenger Hub";
-        private const int MinLength = 4;
+        private const int MinLength = 8;
 
         private static Form NewForm(string title)
         {

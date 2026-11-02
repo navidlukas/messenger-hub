@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.23 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
+MESSENGER HUB  v0.24 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -53,6 +53,8 @@ USING IT
     A custom site must ask before using your microphone, camera or clipboard (the messengers
     are allowed automatically).
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
+  - If a tile ever fails to start, it is retried automatically and the reason is written to
+    data\startup.log (kept under 100 KB). Right-click > Reload also restarts a blank tile.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
     It asks first, and the password screen's "Forgot? Reset" asks you to type RESET.
 

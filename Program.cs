@@ -175,6 +175,7 @@ namespace MessengerHub
         public static readonly string SettingsFile = Path.Combine(Data, "settings.ini");
         public static readonly string SecurityFile = Path.Combine(Data, "security.dat"); // salt + wrapped master key
         public static readonly string CookieKeyFile = Path.Combine(Data, "webview.key"); // portable cookie key
+        public static readonly string StartupLog = Path.Combine(Data, "startup.log");  // why an account failed to start
         public static readonly string ResetFlag = Path.Combine(Root, "reset.pending");
 
         public static void EnsureFolders()
@@ -190,6 +191,26 @@ namespace MessengerHub
                 File.WriteAllText(probe, "ok");
                 File.Delete(probe);
             }
+        }
+    }
+
+    /// <summary>Tiny diagnostic log (data\startup.log, capped at 100 KB) for accounts that fail to start.</summary>
+    internal static class Diag
+    {
+        private static readonly object gate = new object();
+
+        public static void Write(string msg)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    var f = new FileInfo(AppPaths.StartupLog);
+                    if (f.Exists && f.Length > 100 * 1024) f.Delete();
+                    File.AppendAllText(AppPaths.StartupLog, DateTime.Now.ToString("s") + "  " + msg + Environment.NewLine);
+                }
+            }
+            catch { }
         }
     }
 }

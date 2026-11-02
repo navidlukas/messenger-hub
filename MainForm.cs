@@ -810,9 +810,17 @@ namespace MessengerHub
 
         private async Task CheckStartupLoad(Account acc)
         {
-            if (!acc.InitStarted || acc.View.IsDisposed) return;
+            if (acc.View.IsDisposed || acc.StartupReloads >= MaxStartupReloads) return;
+            if (!acc.InitStarted)
+            {
+                // Its browser failed to start earlier: try again.
+                acc.StartupReloads++;
+                Diag.Write("startup check: " + acc.Name + " never started, retrying (" + acc.StartupReloads + ")");
+                ReloadOrOpen(acc);
+                return;
+            }
             var core = acc.View.CoreWebView2;
-            if (core == null || acc.StartupReloads >= MaxStartupReloads) return;
+            if (core == null) return;
 
             // If initial navigation is still running in background, give it time to finish.
             if (!acc.FirstNavDone.Task.IsCompleted) return;
@@ -824,7 +832,8 @@ namespace MessengerHub
             {
                 acc.StartupReloads++;
                 acc.LastRecoverUtc = DateTime.UtcNow;
-                try { core.Reload(); } catch { }
+                Diag.Write("startup check: " + acc.Name + " not usable, reloading (" + acc.StartupReloads + ")");
+                ReloadOrOpen(acc);
             }
         }
 
@@ -1033,10 +1042,7 @@ namespace MessengerHub
             });
             acc.ForwardButton.Enabled = false;
 
-            var reloadBtn = MakeNavButton("\u21BB", "Reload", (s, e) =>
-            {
-                try { acc.View.CoreWebView2?.Reload(); } catch { }
-            });
+            var reloadBtn = MakeNavButton("\u21BB", "Reload", (s, e) => ReloadOrOpen(acc));
 
             var homeBtn = MakeNavButton("\u2302", "Go to starting URL", (s, e) =>
             {
@@ -1188,7 +1194,7 @@ namespace MessengerHub
             rename.Click += (s, e) => RenameAccount(acc);
 
             var reload = new ToolStripMenuItem("Re&load");
-            reload.Click += (s, e) => acc.View.CoreWebView2?.Reload();
+            reload.Click += (s, e) => ReloadOrOpen(acc);
 
             var remove = new ToolStripMenuItem("Re&move...");
             remove.Click += async (s, e) => await RemoveAccountAsync(acc);
@@ -1713,8 +1719,10 @@ namespace MessengerHub
             }
             catch (Exception ex)
             {
+                Diag.Write("browser start failed for " + acc.Name + ": " + ex.Message);
                 acc.FirstNavDone.TrySetResult(false);
-                if (!acc.View.IsDisposed)
+                acc.InitStarted = false; // the startup check, Reload or selecting the tile will try again
+                if (!acc.View.IsDisposed && acc.StartupReloads == 0)
                     MessageBox.Show(this, "Could not open '" + acc.Name + "':\n\n" + ex.Message,
                         AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -1781,6 +1789,7 @@ namespace MessengerHub
                     }
                     if (AccountIcon(acc) == null && (e.IsSuccess || acc.IsCustom))
                         _ = CaptureIconAsync(acc);
+                    if (!e.IsSuccess) Diag.Write("page did not load for " + acc.Name + ": " + e.WebErrorStatus);
                     acc.FirstNavDone.TrySetResult(e.IsSuccess);
                     if (isSystemIdle && IsVisibleActive(acc)) ApplyIdlePageFreeze(acc, true);
                 };
@@ -1788,22 +1797,14 @@ namespace MessengerHub
                 core.ProcessFailed += (s, e) =>
                 {
                     if (acc.View.IsDisposed) return;
+                    Diag.Write("browser process failed for " + acc.Name + ": " + e.ProcessFailedKind);
                     if (DateTime.UtcNow - acc.LastRecoverUtc < TimeSpan.FromSeconds(20)) return;
                     acc.LastRecoverUtc = DateTime.UtcNow;
                     try { acc.View.CoreWebView2?.Reload(); } catch { }
                 };
                 core.FaviconChanged += async (s, e) => await CaptureIconAsync(acc);
 
-                // Ensure the web app's persistent storage is locked into the browser engine.
-                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnsurePersistentStorage);
-                // Videos/GIFs only play when clicked (saves CPU).
-                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BlockVideoAutoplay);
-                // Auto-enable WhatsApp's "Turn on background sync" prompt once when a profile first loads.
-                if (acc.Service == ServiceType.WhatsApp)
-                    await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnableWhatsAppBackgroundSync);
-                // Push unread badge changes immediately via MutationObserver for DOM-unread services.
-                if (acc.Service.UnreadScript != null)
-                    await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BuildUnreadPushScript(acc.Service.UnreadScript));
+                // Unread counts pushed by the page (registered before the scripts that send them).
                 core.WebMessageReceived += (s, e) =>
                 {
                     try
@@ -1822,6 +1823,17 @@ namespace MessengerHub
                     catch { }
                 };
 
+                // Page scripts. Retried once, and the page is opened even if they can't be added.
+                for (int attempt = 1; attempt <= 2; attempt++)
+                {
+                    try { await AddPageScriptsAsync(core, acc); break; }
+                    catch (Exception ex)
+                    {
+                        Diag.Write("page scripts failed (try " + attempt + ") for " + acc.Name + ": " + ex.Message);
+                        await Task.Delay(500);
+                    }
+                }
+
                 if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; }
                 core.Navigate(acc.StartUrl);
                 SyncBrowserBar(acc);
@@ -1829,11 +1841,39 @@ namespace MessengerHub
                 UpdateIdentityTimerState();
                 UpdateUnreadTimerState();
             }
-            catch
+            catch (Exception ex)
             {
-                acc.FirstNavDone.TrySetResult(false);
-                /* the account was removed while starting */
+                Diag.Write("setup failed for " + acc.Name + ": " + ex.Message);
+                acc.FirstNavDone.TrySetResult(false); // usually the account was removed while starting
+                // Still open the page, so the tile is never left blank.
+                try { if (!acc.View.IsDisposed) acc.View.CoreWebView2?.Navigate(acc.StartUrl); } catch { }
             }
+        }
+
+        /// <summary>Scripts that run on every page of an account. Safe to add twice (each guards itself).</summary>
+        private static async Task AddPageScriptsAsync(CoreWebView2 core, Account acc)
+        {
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnsurePersistentStorage); // keep logins from being evicted
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BlockVideoAutoplay);      // videos/GIFs only play when clicked
+            if (acc.Service == ServiceType.WhatsApp)
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnableWhatsAppBackgroundSync);
+            if (acc.Service.UnreadScript != null) // push unread changes immediately instead of waiting for the poll
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BuildUnreadPushScript(acc.Service.UnreadScript));
+        }
+
+        /// <summary>Reloads the page; if the tile has no page yet (blank), opens its start page; if its browser never started, starts it.</summary>
+        private void ReloadOrOpen(Account acc)
+        {
+            if (acc == null || acc.View.IsDisposed) return;
+            var core = acc.View.CoreWebView2;
+            if (core == null) { if (env != null && !acc.InitStarted) _ = InitAccountAsync(acc); return; }
+            try
+            {
+                string src = core.Source;
+                if (string.IsNullOrEmpty(src) || src.StartsWith("about:", StringComparison.OrdinalIgnoreCase)) core.Navigate(acc.StartUrl);
+                else core.Reload();
+            }
+            catch { }
         }
 
         /// <summary>Settings shared by account views and their pop-up windows.</summary>
@@ -2099,7 +2139,7 @@ namespace MessengerHub
             if (!await IsReady(acc))
             {
                 acc.LastRecoverUtc = DateTime.UtcNow;
-                try { core.Reload(); } catch { }
+                ReloadOrOpen(acc);
             }
         }
 

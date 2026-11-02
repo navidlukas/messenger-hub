@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -23,8 +25,8 @@ namespace MessengerHub
         public int Unread;
         public DateTime LoadedAt = DateTime.UtcNow; // last full page load (stuck-page checks wait a moment after it)
         public bool InitStarted;                     // true once WebView2 initialization has been started
-        public readonly System.Threading.Tasks.TaskCompletionSource<bool> FirstNavDone =
-            new System.Threading.Tasks.TaskCompletionSource<bool>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource<bool> FirstNavDone =
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool? SentActive;                     // last "is this tab active" value sent to the page (null = not sent since load)
         public int IdentityMisses;                   // identity checks that found no logged-in name (for back-off)
         public DateTime IdentityNextUtc = DateTime.MinValue; // next identity check allowed
@@ -48,8 +50,8 @@ namespace MessengerHub
 
         // Hosting services where every customer gets a subdomain. Each customer is its own "site",
         // so a custom tile never treats another customer's pages as its own.
-        private static readonly System.Collections.Generic.HashSet<string> PrivateSuffixes =
-            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        private static readonly HashSet<string> PrivateSuffixes =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
                 "herokuapp.com", "azurewebsites.net", "web.app", "firebaseapp.com", "appspot.com",
@@ -57,8 +59,8 @@ namespace MessengerHub
                 "blogspot.com", "wixsite.com", "squarespace.com", "myshopify.com"
             };
 
-        private static readonly System.Collections.Generic.HashSet<string> SecondLevelTlds =
-            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        private static readonly HashSet<string> SecondLevelTlds =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "co", "com", "net", "org", "gov", "edu", "ac", "mil", "ne", "or", "go", "gob"
             };
@@ -87,7 +89,7 @@ namespace MessengerHub
             string[] parts = h.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length <= 2) return h;
             int n = parts.Length;
-            if (n >= 2 && PrivateSuffixes.Contains(parts[n - 2] + "." + parts[n - 1])) return h;
+            if (PrivateSuffixes.Contains(parts[n - 2] + "." + parts[n - 1])) return h;
             if (parts[n - 1].Length == 2 && SecondLevelTlds.Contains(parts[n - 2]))
                 return parts[n - 3] + "." + parts[n - 2] + "." + parts[n - 1];
             return parts[n - 2] + "." + parts[n - 1];

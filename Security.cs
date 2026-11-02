@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -160,10 +159,25 @@ namespace MessengerHub
         /// <summary>Current cache size (bytes) for one account's profile.</summary>
         public long MeasureProfileCache(string profileId)
         {
-            string profile = Path.Combine(AppPaths.EbWebView, "WV2Profile_" + profileId);
+            return CacheSize(Path.Combine(AppPaths.EbWebView, "WV2Profile_" + profileId));
+        }
+
+        private static long CacheSize(string profile)
+        {
             long total = 0;
             foreach (var c in CacheFolders) total += DirSize(Path.Combine(profile, c));
             return total;
+        }
+
+        /// <summary>Deletes an account's profile folder (login data, caches, lock files) after any restore in progress.</summary>
+        public void DeleteProfile(string profileId)
+        {
+            string profile = Path.Combine(AppPaths.EbWebView, "WV2Profile_" + profileId);
+            Task pending;
+            lock (unlockTasks) unlockTasks.TryGetValue(profile, out pending);
+            try { pending?.Wait(60000); } catch { }
+            TryDeleteDir(profile);
+            lock (unlockTasks) unlockTasks.Remove(profile);
         }
 
         /// <summary>At exit (browser already closed): clear the cache of any profile exceeding 200 MB.</summary>
@@ -171,9 +185,7 @@ namespace MessengerHub
         {
             Parallel.ForEach(ProfileDirs().ToList(), profile =>
             {
-                long total = 0;
-                foreach (var c in CacheFolders) total += DirSize(Path.Combine(profile, c));
-                if (total <= ProfileCacheLimitBytes) return;
+                if (CacheSize(profile) <= ProfileCacheLimitBytes) return;
                 foreach (var c in CacheFolders) TryDeleteDir(Path.Combine(profile, c));
             });
         }

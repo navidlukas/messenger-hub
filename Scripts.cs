@@ -715,15 +715,7 @@ namespace MessengerHub
   if (window.__mhNoAutoplay) return;
   window.__mhNoAutoplay = true;
 
-  const isVideo = el => {
-    if (!el) return false;
-    try { if (el instanceof HTMLVideoElement) return true; } catch (e) {}
-    try {
-      const t = (el.tagName || el.nodeName || '').toUpperCase();
-      return t === 'VIDEO';
-    } catch (e) {}
-    return false;
-  };
+  const isVideo = el => el instanceof HTMLVideoElement;
 
   const nativePlay = HTMLMediaElement.prototype.play;
   const nativePause = HTMLMediaElement.prototype.pause;
@@ -947,8 +939,7 @@ namespace MessengerHub
         /// <summary>
         /// Builds an event-driven MutationObserver script that pushes unread count changes to the host
         /// immediately via postMessage('__mh_unread:' + n). Runs ONLY in the top frame so child iframes
-        /// never overwrite the unread count with 0, and uses leading-edge execution so background timer
-        /// throttling cannot delay updates.
+        /// never overwrite the unread count with 0, and uses leading-edge execution (at most once a second, once every 5 s for tabs that are not active).
         /// </summary>
         public static string BuildUnreadPushScript(string unreadExpr) => @"
 (() => {
@@ -967,12 +958,14 @@ namespace MessengerHub
     } catch (e) {}
   };
   const schedule = () => {
+    // At most once a second for the tab you are looking at, once every 5 s for the others.
+    const gap = window.__mhActive === false ? 5000 : 1000;
     const elapsed = Date.now() - lastRun;
-    if (elapsed >= 1000) {
+    if (elapsed >= gap) {
       if (timer) { clearTimeout(timer); timer = 0; }
       check();
     } else if (!timer) {
-      timer = setTimeout(check, 1000 - elapsed);
+      timer = setTimeout(check, gap - elapsed);
     }
   };
   const start = () => {

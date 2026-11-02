@@ -76,29 +76,48 @@ namespace MessengerHub
         /// <summary>Encrypts src to dst, streaming (handles files of any size without loading them into memory).</summary>
         public static void EncryptFile(string src, string dst, byte[] key64)
         {
-            byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
-            byte[] iv = Random(IvLen);
-            using (var outFs = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferSize))
-            using (var mac = new HMACSHA256(mk))
+            EncryptTo(dst, key64, cs =>
             {
-                outFs.Write(iv, 0, IvLen);
-                mac.TransformBlock(iv, 0, IvLen, null, 0);
-                using (var aes = Aes.Create())
-                {
-                    aes.KeySize = 256; aes.Key = enc; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
-                    var tee = new HmacTeeStream(outFs, mac);
-                    using (var cs = new CryptoStream(tee, aes.CreateEncryptor(), CryptoStreamMode.Write))
-                    using (var inFs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize))
-                        inFs.CopyTo(cs, FileBufferSize); // CryptoStream.Dispose flushes the final block into the tee
-                }
-                mac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                outFs.Write(mac.Hash, 0, TagLen);
-                outFs.Flush(true); // really on disk before we delete the original
-            }
+                using (var inFs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize))
+                    inFs.CopyTo(cs, FileBufferSize);
+            });
         }
 
         /// <summary>Zips and encrypts srcDir directly to dst in a single streaming pass (no temporary zip file on disk).</summary>
         public static void EncryptDirectory(string srcDir, string dst, byte[] key64)
+        {
+            EncryptTo(dst, key64, cs =>
+            {
+                using (var zip = new ZipArchive(cs, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    var rootDi = new DirectoryInfo(srcDir);
+                    string prefix = rootDi.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                    var buf = GetBuffer();
+                    foreach (var fi in rootDi.EnumerateFiles("*", SearchOption.AllDirectories))
+                    {
+                        string relPath = fi.FullName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                            ? fi.FullName.Substring(prefix.Length).Replace('\\', '/')
+                            : fi.Name;
+                        string ext = Path.GetExtension(fi.Name);
+                        bool rawStore = ext.Equals(".ldb", StringComparison.OrdinalIgnoreCase) ||
+                                        ext.Equals(".pma", StringComparison.OrdinalIgnoreCase) ||
+                                        ext.Equals(".pak", StringComparison.OrdinalIgnoreCase);
+                        var entry = zip.CreateEntry(relPath, rawStore ? CompressionLevel.NoCompression : CompressionLevel.Fastest);
+                        try { entry.LastWriteTime = fi.LastWriteTimeUtc; } catch { }
+                        using (var inFs = new FileStream(fi.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileBufferSize))
+                        using (var es = entry.Open())
+                        {
+                            int r;
+                            while ((r = inFs.Read(buf, 0, buf.Length)) > 0)
+                                es.Write(buf, 0, r);
+                        }
+                    }
+                }
+            });
+        }
+
+        /// <summary>Writes [IV][ciphertext][HMAC tag] to dst; writePlain receives the stream that takes the plain data.</summary>
+        private static void EncryptTo(string dst, byte[] key64, Action<Stream> writePlain)
         {
             byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
             byte[] iv = Random(IvLen);
@@ -112,31 +131,7 @@ namespace MessengerHub
                     aes.KeySize = 256; aes.Key = enc; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
                     var tee = new HmacTeeStream(outFs, mac);
                     using (var cs = new CryptoStream(tee, aes.CreateEncryptor(), CryptoStreamMode.Write))
-                    using (var zip = new ZipArchive(cs, ZipArchiveMode.Create, leaveOpen: true))
-                    {
-                        var rootDi = new DirectoryInfo(srcDir);
-                        string prefix = rootDi.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                        var buf = GetBuffer();
-                        foreach (var fi in rootDi.EnumerateFiles("*", SearchOption.AllDirectories))
-                        {
-                            string relPath = fi.FullName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                                ? fi.FullName.Substring(prefix.Length).Replace('\\', '/')
-                                : fi.Name;
-                            string ext = Path.GetExtension(fi.Name);
-                            bool rawStore = ext.Equals(".ldb", StringComparison.OrdinalIgnoreCase) ||
-                                            ext.Equals(".pma", StringComparison.OrdinalIgnoreCase) ||
-                                            ext.Equals(".pak", StringComparison.OrdinalIgnoreCase);
-                            var entry = zip.CreateEntry(relPath, rawStore ? CompressionLevel.NoCompression : CompressionLevel.Fastest);
-                            try { entry.LastWriteTime = fi.LastWriteTimeUtc; } catch { }
-                            using (var inFs = new FileStream(fi.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileBufferSize))
-                            using (var es = entry.Open())
-                            {
-                                int r;
-                                while ((r = inFs.Read(buf, 0, buf.Length)) > 0)
-                                    es.Write(buf, 0, r);
-                            }
-                        }
-                    }
+                        writePlain(cs); // CryptoStream.Dispose flushes the final block into the tee
                 }
                 mac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
                 outFs.Write(mac.Hash, 0, TagLen);
@@ -182,48 +177,14 @@ namespace MessengerHub
             catch { return false; }
         }
 
-        /// <summary>Verifies the MAC and decrypts src to dst in a single streaming pass. Returns false (writing nothing) on any failure.</summary>
+        /// <summary>Verifies the MAC and decrypts src to dst. Returns false (leaving no file) on any failure.</summary>
         public static bool DecryptFile(string src, string dst, byte[] key64)
         {
-            byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
-            long len = new FileInfo(src).Length;
-            if (len < IvLen + TagLen) return false;
             if (!VerifyFile(src, key64)) return false; // no plaintext is written unless the MAC is correct
-
             try
             {
-                using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize))
-                using (var mac = new HMACSHA256(mk))
-                {
-                    var iv = new byte[IvLen];
-                    if (fs.Read(iv, 0, IvLen) != IvLen) return false;
-                    mac.TransformBlock(iv, 0, IvLen, null, 0);
-
-                    long cipherLen = len - IvLen - TagLen;
-                    using (var aes = Aes.Create())
-                    {
-                        aes.KeySize = 256; aes.Key = enc; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
-                        using (var outFs = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferSize))
-                        using (var cs = new CryptoStream(outFs, aes.CreateDecryptor(), CryptoStreamMode.Write))
-                        {
-                            var buf = GetBuffer();
-                            long done = 0;
-                            while (done < cipherLen)
-                            {
-                                int want = (int)Math.Min(buf.Length, cipherLen - done);
-                                int r = fs.Read(buf, 0, want);
-                                if (r <= 0) throw new CryptographicException("Unexpected end of stream");
-                                mac.TransformBlock(buf, 0, r, null, 0);
-                                cs.Write(buf, 0, r);
-                                done += r;
-                            }
-                            mac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                            var tag = new byte[TagLen];
-                            if (fs.Read(tag, 0, TagLen) != TagLen || !FixedEquals(tag, mac.Hash))
-                                throw new CryptographicException("MAC verification failed");
-                        }
-                    }
-                }
+                using (var outFs = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferSize))
+                    DecryptTo(src, key64, outFs);
                 return true;
             }
             catch
@@ -234,95 +195,53 @@ namespace MessengerHub
         }
 
         /// <summary>
-        /// Verifies the MAC, decrypts src in memory (for archives up to 128 MB), and extracts directly into dstDir
-        /// without writing or reading a temporary .mhtmp zip file on disk.
+        /// Verifies the MAC, decrypts src (in memory up to 128 MB, else via a temporary file) and
+        /// extracts the archive into dstDir.
         /// </summary>
         public static bool DecryptDirectory(string src, string dstDir, byte[] key64)
         {
-            byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
-            long len = new FileInfo(src).Length;
-            if (len < IvLen + TagLen) return false;
-            long cipherLen = len - IvLen - TagLen;
-
-            // Fallback to disk-backed DecryptFile for unusually huge archives (>128 MB).
-            if (cipherLen > 128L * 1024L * 1024L)
-            {
-                string tmpZip = dstDir + ".mhtmp";
-                try
-                {
-                    if (!DecryptFile(src, tmpZip, key64)) return false;
-                    if (Directory.Exists(dstDir)) { try { Directory.Delete(dstDir, true); } catch { } }
-                    ZipFile.ExtractToDirectory(tmpZip, dstDir);
-                    return true;
-                }
-                catch { return false; }
-                finally { try { if (File.Exists(tmpZip)) File.Delete(tmpZip); } catch { } }
-            }
-
+            string tmpZip = null;
             try
             {
-                using (var ms = new MemoryStream((int)cipherLen))
+                long cipherLen = new FileInfo(src).Length - IvLen - TagLen;
+                if (cipherLen < 0) return false;
+
+                Stream zipStream;
+                if (cipherLen > 128L * 1024L * 1024L)
                 {
-                    using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize))
-                    using (var mac = new HMACSHA256(mk))
-                    {
-                        var iv = new byte[IvLen];
-                        if (fs.Read(iv, 0, IvLen) != IvLen) return false;
-                        mac.TransformBlock(iv, 0, IvLen, null, 0);
-
-                        using (var aes = Aes.Create())
-                        {
-                            aes.KeySize = 256; aes.Key = enc; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
-                            using (var cs = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Write, leaveOpen: true))
-                            {
-                                var buf = GetBuffer();
-                                long done = 0;
-                                while (done < cipherLen)
-                                {
-                                    int want = (int)Math.Min(buf.Length, cipherLen - done);
-                                    int r = fs.Read(buf, 0, want);
-                                    if (r <= 0) throw new CryptographicException("Unexpected end of stream");
-                                    mac.TransformBlock(buf, 0, r, null, 0);
-                                    cs.Write(buf, 0, r);
-                                    done += r;
-                                }
-                                mac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                                var tag = new byte[TagLen];
-                                if (fs.Read(tag, 0, TagLen) != TagLen || !FixedEquals(tag, mac.Hash))
-                                    throw new CryptographicException("MAC verification failed");
-                            }
-                        }
-                    }
-
+                    tmpZip = dstDir + ".mhtmp";
+                    if (!DecryptFile(src, tmpZip, key64)) return false;
+                    zipStream = new FileStream(tmpZip, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize);
+                }
+                else
+                {
+                    var ms = new MemoryStream((int)cipherLen);
+                    DecryptTo(src, key64, ms);
                     ms.Position = 0;
-                    if (Directory.Exists(dstDir)) { try { Directory.Delete(dstDir, true); } catch { } }
-                    string fullDestDir = Path.GetFullPath(dstDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                    Directory.CreateDirectory(fullDestDir);
+                    zipStream = ms;
+                }
 
-                    using (var zip = new ZipArchive(ms, ZipArchiveMode.Read, leaveOpen: false))
+                if (Directory.Exists(dstDir)) { try { Directory.Delete(dstDir, true); } catch { } }
+                string root = Path.GetFullPath(dstDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                Directory.CreateDirectory(root);
+
+                using (var zip = new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: false))
+                {
+                    var buf = GetBuffer();
+                    foreach (var entry in zip.Entries)
                     {
-                        var buf = GetBuffer();
-                        foreach (var entry in zip.Entries)
+                        string dest = Path.GetFullPath(Path.Combine(root, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
+                        if (!dest.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue; // never write outside dstDir
+                        if (string.IsNullOrEmpty(entry.Name)) { Directory.CreateDirectory(dest); continue; } // a folder entry
+                        Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                        using (var inEs = entry.Open())
+                        using (var outFile = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferSize))
                         {
-                            string dirPath = Path.GetFullPath(Path.Combine(fullDestDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
-                            if (string.IsNullOrEmpty(entry.Name) && entry.FullName.EndsWith("/"))
-                            {
-                                if (dirPath.StartsWith(fullDestDir, StringComparison.OrdinalIgnoreCase))
-                                    Directory.CreateDirectory(dirPath);
-                                continue;
-                            }
-                            string destFile = Path.GetFullPath(Path.Combine(fullDestDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
-                            if (!destFile.StartsWith(fullDestDir, StringComparison.OrdinalIgnoreCase)) continue;
-                            Directory.CreateDirectory(Path.GetDirectoryName(destFile));
-                            using (var inEs = entry.Open())
-                            using (var outFile = new FileStream(destFile, FileMode.Create, FileAccess.Write, FileShare.None, FileBufferSize))
-                            {
-                                int r;
-                                while ((r = inEs.Read(buf, 0, buf.Length)) > 0)
-                                    outFile.Write(buf, 0, r);
-                            }
-                            try { File.SetLastWriteTimeUtc(destFile, entry.LastWriteTime.UtcDateTime); } catch { }
+                            int r;
+                            while ((r = inEs.Read(buf, 0, buf.Length)) > 0)
+                                outFile.Write(buf, 0, r);
                         }
+                        try { File.SetLastWriteTimeUtc(dest, entry.LastWriteTime.UtcDateTime); } catch { }
                     }
                 }
                 return true;
@@ -330,6 +249,49 @@ namespace MessengerHub
             catch
             {
                 return false;
+            }
+            finally
+            {
+                try { if (tmpZip != null && File.Exists(tmpZip)) File.Delete(tmpZip); } catch { }
+            }
+        }
+
+        /// <summary>Streams the decrypted content of src into dest and checks the MAC at the end (throws if it fails).</summary>
+        private static void DecryptTo(string src, byte[] key64, Stream dest)
+        {
+            byte[] enc = Sub(key64, 0, AesKey), mk = Sub(key64, AesKey, MacKey);
+            long cipherLen = new FileInfo(src).Length - IvLen - TagLen;
+            if (cipherLen < 0) throw new CryptographicException("File too short");
+
+            using (var fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, FileBufferSize))
+            using (var mac = new HMACSHA256(mk))
+            {
+                var iv = new byte[IvLen];
+                if (fs.Read(iv, 0, IvLen) != IvLen) throw new CryptographicException("Unexpected end of stream");
+                mac.TransformBlock(iv, 0, IvLen, null, 0);
+
+                using (var aes = Aes.Create())
+                {
+                    aes.KeySize = 256; aes.Key = enc; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+                    using (var cs = new CryptoStream(dest, aes.CreateDecryptor(), CryptoStreamMode.Write, leaveOpen: true))
+                    {
+                        var buf = GetBuffer();
+                        long done = 0;
+                        while (done < cipherLen)
+                        {
+                            int want = (int)Math.Min(buf.Length, cipherLen - done);
+                            int r = fs.Read(buf, 0, want);
+                            if (r <= 0) throw new CryptographicException("Unexpected end of stream");
+                            mac.TransformBlock(buf, 0, r, null, 0);
+                            cs.Write(buf, 0, r);
+                            done += r;
+                        }
+                        mac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                        var tag = new byte[TagLen];
+                        if (fs.Read(tag, 0, TagLen) != TagLen || !FixedEquals(tag, mac.Hash))
+                            throw new CryptographicException("MAC verification failed");
+                    }
+                }
             }
         }
 

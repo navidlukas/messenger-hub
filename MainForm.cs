@@ -53,7 +53,7 @@ namespace MessengerHub
         private bool reallyExit;
         private bool resetting;
         private bool wasMinimized;
-        private readonly System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+        private readonly System.Windows.Forms.Timer updateCheckTimer = new System.Windows.Forms.Timer { Interval = 60 * 60 * 1000 };
         private const uint IdleCacheCheckMs = 10u * 60u * 1000u;
         private const int IdlePollActiveMs = 30 * 1000;
         private const int IdlePollWakeMs = 1000;
@@ -232,7 +232,7 @@ namespace MessengerHub
             {
                 try
                 {
-                    security?.TrimBrowserWorkingSets();
+                    security.TrimBrowserWorkingSets();
                     System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                     GC.Collect(2, GCCollectionMode.Forced, true, true);
                     GC.WaitForPendingFinalizers();
@@ -421,7 +421,7 @@ namespace MessengerHub
             return CallNextHookEx(mouseHook, nCode, wParam, lParam);
         }
 
-        public void CloseAllMenus()
+        private void CloseAllMenus()
         {
             foreach (ToolStripItem item in menu.Items)
             {
@@ -499,7 +499,7 @@ namespace MessengerHub
         /// </summary>
         private ToolStripItem[] CacheSizeItems()
         {
-            if (accounts.Count == 0 || security == null)
+            if (accounts.Count == 0)
                 return new ToolStripItem[] { new ToolStripMenuItem("(no accounts)") { Enabled = false } };
 
             var snapshot = accounts.Select(a => new
@@ -714,7 +714,7 @@ namespace MessengerHub
             SelectAccount(initial);
 
             // Unlock the active account's profile on a background thread in parallel with WebView2 engine startup.
-            var initialUnlockTask = security != null && initial != null
+            var initialUnlockTask = initial != null
                 ? security.UnlockProfileAsync(initial.Id)
                 : Task.CompletedTask;
 
@@ -759,10 +759,7 @@ namespace MessengerHub
             {
                 await initialUnlockTask;
                 // Begin unlocking all remaining profiles in parallel in the background.
-                if (security != null)
-                {
-                    foreach (var bg in remaining) _ = security.UnlockProfileAsync(bg.Id);
-                }
+                foreach (var bg in remaining) _ = security.UnlockProfileAsync(bg.Id);
                 await InitAccountAsync(initial);
                 await Task.Delay(500);
             }
@@ -1708,7 +1705,7 @@ namespace MessengerHub
 
             try
             {
-                if (security != null) await security.UnlockProfileAsync(acc.Id);
+                await security.UnlockProfileAsync(acc.Id);
                 if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; }
                 var options = env.CreateCoreWebView2ControllerOptions();
                 options.ProfileName = acc.Id; // separate login/cookies per account
@@ -1727,7 +1724,7 @@ namespace MessengerHub
                 if (acc.View.IsDisposed) { acc.FirstNavDone.TrySetResult(false); return; } // removed while it was starting
 
                 var core = acc.View.CoreWebView2;
-                try { security?.AddBrowserPid((int)core.BrowserProcessId); } catch { } // so we can wait for it on exit
+                try { security.AddBrowserPid((int)core.BrowserProcessId); } catch { } // so we can wait for it on exit
                 ConfigureCore(core, acc);
                 EnableTrackingPrevention(acc); // ad/tracker blocking on by default, before the first navigation
 
@@ -1971,7 +1968,7 @@ namespace MessengerHub
             UpdateUnreadTimerState();
         }
 
-        /// <summary>Periodic check for a new release (every 5 minutes; the update check itself runs weekly).</summary>
+        /// <summary>Hourly nudge for the update check, which itself only runs once a week.</summary>
         private void UpdateCheckTick()
         {
             // Cheap no-op until the weekly update check is due. Memory is trimmed on idle/minimize, not here.
@@ -2013,7 +2010,7 @@ namespace MessengerHub
         /// </summary>
         private async Task IdleCacheCheckTickAsync()
         {
-            if (security == null || checkingIdleCache || !IsEligibleForSilentCacheClean()) return;
+            if (checkingIdleCache || !IsEligibleForSilentCacheClean()) return;
             checkingIdleCache = true;
             try
             {
@@ -2077,14 +2074,17 @@ namespace MessengerHub
                     _ = RecoverIfBlankAsync(acc);
                 }
                 try { acc.View.Focus(); } catch { }
-                _ = PollAccountUnreadAsync(acc);
-                _ = Task.Delay(250).ContinueWith(_ =>
-                {
-                    if (!IsDisposed && acc == active)
-                        Invoke((Action)(() => _ = PollAccountUnreadAsync(acc)));
-                });
+                _ = PollAfterSelectAsync(acc);
             }
             UpdateTitle();
+        }
+
+        /// <summary>Reads the unread count now and again shortly after, once the page knows it is the active tab.</summary>
+        private async Task PollAfterSelectAsync(Account acc)
+        {
+            await PollAccountUnreadAsync(acc);
+            await Task.Delay(250);
+            if (!IsDisposed && acc == active) await PollAccountUnreadAsync(acc);
         }
 
         private async Task RecoverIfBlankAsync(Account acc)
@@ -2138,6 +2138,11 @@ namespace MessengerHub
             {
                 try { await core.Profile.ClearBrowsingDataAsync(); } catch { }
                 try { core.Profile.Delete(); } catch { } // removes the profile folder
+            }
+            else
+            {
+                // The browser never started for this account, so delete its (possibly restored) profile folder directly.
+                await Task.Run(() => security.DeleteProfile(acc.Id));
             }
 
             ResetCustomIcon(acc);
@@ -2633,7 +2638,7 @@ namespace MessengerHub
         // ------------------------------------------------------------------ Browser events
 
         // Allow what a messenger needs (notifications, mic for voice notes, camera, clipboard)
-        // but only for the account's own site.
+        // but only for the account's own site. Custom websites are asked before mic, camera or clipboard.
         private void OnPermissionRequested(Account acc, CoreWebView2PermissionRequestedEventArgs e)
         {
             if (!acc.OwnsUrl(e.Uri)) return;
@@ -2642,10 +2647,13 @@ namespace MessengerHub
             {
                 case CoreWebView2PermissionKind.Notifications:
                 case CoreWebView2PermissionKind.PersistentStorage:
+                    e.State = CoreWebView2PermissionState.Allow;
+                    break;
                 case CoreWebView2PermissionKind.Microphone:
                 case CoreWebView2PermissionKind.Camera:
                 case CoreWebView2PermissionKind.ClipboardRead:
-                    e.State = CoreWebView2PermissionState.Allow;
+                    // Messengers get these automatically; a custom website has to ask (the browser's own prompt).
+                    if (!acc.IsCustom) e.State = CoreWebView2PermissionState.Allow;
                     break;
             }
         }

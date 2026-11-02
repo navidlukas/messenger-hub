@@ -1,3 +1,4 @@
+using System;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -8,7 +9,7 @@ namespace MessengerHub
         internal const string InvalidUrlMessage = "Please enter a valid website URL (for example: discord.com).";
 
         /// <summary>On OK, checks the URL box and keeps the dialog open if it isn't a valid website. Returns the checked URL.</summary>
-        private static System.Func<string> RequireValidUrl(Form f, TextBox urlBox)
+        private static Func<string> RequireValidUrl(Form f, TextBox urlBox)
         {
             string valid = null;
             f.FormClosing += (s, e) =>

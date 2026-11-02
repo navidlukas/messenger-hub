@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.22 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
+MESSENGER HUB  v0.23 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -50,6 +50,8 @@ USING IT
     tile has a small address bar (back, forward, address). Hide or show it from the
     tile's right-click menu. A site hosted under its own subdomain (for example
     name.github.io or name.vercel.app) is treated as its own site, separate from others.
+    A custom site must ask before using your microphone, camera or clipboard (the messengers
+    are allowed automatically).
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).
     It asks first, and the password screen's "Forgot? Reset" asks you to type RESET.

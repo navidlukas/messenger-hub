@@ -26,14 +26,14 @@ if errorlevel 1 (
 dotnet build Updater\Updater.csproj -c Release -o "dist\MessengerHub"
 if errorlevel 1 (
   echo.
-  echo  Build failed ^(updater^). Copy the error above and send it to Claude.
+  echo  Build failed ^(updater^). Copy the error shown above.
   pause
   exit /b 1
 )
 dotnet build MessengerHub.csproj -c Release --no-restore -o "dist\MessengerHub"
 if errorlevel 1 (
   echo.
-  echo  Build failed. Copy the error above and send it to Claude.
+  echo  Build failed. Copy the error shown above.
   pause
   exit /b 1
 )

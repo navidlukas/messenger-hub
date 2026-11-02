@@ -12,6 +12,8 @@ namespace MessengerHub
         // Set when the user chose Reset: the data is about to be deleted, so exit skips re-encrypting it.
         internal static volatile bool ResetInProgress;
 
+        internal const string AppName = "Messenger Hub";
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -70,7 +72,7 @@ namespace MessengerHub
                             "but it can't write to this location:\n\n" + AppPaths.Root +
                             "\n\nMove the app folder somewhere writable (e.g. Desktop, Documents or a USB drive).\n\n" +
                             ex.Message,
-                            "Messenger Hub", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
 
@@ -157,7 +159,7 @@ namespace MessengerHub
             MessageBox.Show(
                 "The reset could not finish because some files are still in use.\n\n" +
                 "It will finish automatically the next time you start Messenger Hub.",
-                "Messenger Hub", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 

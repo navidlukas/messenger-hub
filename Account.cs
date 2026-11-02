@@ -21,7 +21,7 @@ namespace MessengerHub
         public WebView2 View;
         public AccountButton Button;
         public int Unread;
-        public DateTime LoadedAt = DateTime.UtcNow; // last full page load (for auto-refresh)
+        public DateTime LoadedAt = DateTime.UtcNow; // last full page load (stuck-page checks wait a moment after it)
         public bool InitStarted;                     // true once WebView2 initialization has been started
         public readonly System.Threading.Tasks.TaskCompletionSource<bool> FirstNavDone =
             new System.Threading.Tasks.TaskCompletionSource<bool>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
@@ -31,7 +31,7 @@ namespace MessengerHub
         public bool FirstLoadOk;                     // a top-level navigation has succeeded at least once
         public int StartupReloads;                   // auto-reloads used by the startup stuck-load watchdog
         public DateTime LastRecoverUtc = DateTime.MinValue; // last crash-recovery reload (rate limit)
-        public DateTime LastMemoryPurgeUtc = DateTime.MinValue; // rate limit for CDP memory pressure purges
+        public DateTime LastMemoryPurgeUtc = DateTime.MinValue; // last JS heap compaction (rate limit)
         public bool IdleBgApplied;                   // true while PC-idle CSS/video pause is active on this tab
         public string LastTooltip;                   // cached tooltip string to avoid redundant Win32 TTM_UPDATETIPTEXT calls
         public string CustomUrl;                     // pinned starting URL for Custom website tabs
@@ -141,7 +141,7 @@ namespace MessengerHub
 
     /// <summary>
     /// Round sidebar icon: service color, account label, service letter badge (bottom-right),
-    /// unread badge (top-right), silent / notifications-off marks (left side).
+    /// unread badge (top-right), silent mark (bottom-left).
     /// </summary>
     internal class AccountButton : Control
     {
@@ -162,9 +162,6 @@ namespace MessengerHub
 
         private static readonly SolidBrush BadgeRedBrush = new SolidBrush(Color.FromArgb(234, 67, 53));
         private static readonly SolidBrush MarkBgBrush = new SolidBrush(Color.FromArgb(70, 85, 95));
-
-        private static readonly System.Collections.Generic.Dictionary<string, Bitmap> SharedScaledBitmaps =
-            new System.Collections.Generic.Dictionary<string, Bitmap>();
 
         private bool hover;
 
@@ -198,21 +195,18 @@ namespace MessengerHub
             int size = Math.Max(1, (int)Math.Ceiling(circle.Width));
             if (scaledIcon == null || scaledFrom != SiteIcon || scaledSize != size || Math.Abs(scaledOpacity - opacity) > 0.01f)
             {
+                // Each button keeps only its own scaled copy, rebuilt when the icon, size or opacity changes.
                 scaledBrush?.Dispose();
-                string key = (SiteIcon.GetHashCode()) + "_" + size + "_" + (int)(opacity * 100);
-                if (!SharedScaledBitmaps.TryGetValue(key, out scaledIcon))
+                scaledIcon?.Dispose();
+                scaledIcon = new Bitmap(size, size);
+                using (var sg = Graphics.FromImage(scaledIcon))
+                using (var attrs = new ImageAttributes())
                 {
-                    scaledIcon = new Bitmap(size, size);
-                    using (var sg = Graphics.FromImage(scaledIcon))
-                    using (var attrs = new ImageAttributes())
-                    {
-                        sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                        sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        attrs.SetColorMatrix(new ColorMatrix { Matrix33 = opacity });
-                        sg.DrawImage(SiteIcon, new Rectangle(0, 0, size, size),
-                                     0, 0, SiteIcon.Width, SiteIcon.Height, GraphicsUnit.Pixel, attrs);
-                    }
-                    SharedScaledBitmaps[key] = scaledIcon;
+                    sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    attrs.SetColorMatrix(new ColorMatrix { Matrix33 = opacity });
+                    sg.DrawImage(SiteIcon, new Rectangle(0, 0, size, size),
+                                 0, 0, SiteIcon.Width, SiteIcon.Height, GraphicsUnit.Pixel, attrs);
                 }
                 scaledBrush = new TextureBrush(scaledIcon);
                 scaledFrom = SiteIcon;
@@ -233,7 +227,7 @@ namespace MessengerHub
             if (disposing)
             {
                 scaledBrush?.Dispose();
-                scaledIcon = null;
+                scaledIcon?.Dispose();
                 fontAdd?.Dispose();
                 fontLabel?.Dispose();
                 fontLetter?.Dispose();

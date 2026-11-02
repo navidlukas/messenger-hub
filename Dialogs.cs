@@ -5,6 +5,24 @@ namespace MessengerHub
 {
     internal static class Dialogs
     {
+        internal const string InvalidUrlMessage = "Please enter a valid website URL (for example: discord.com).";
+
+        /// <summary>On OK, checks the URL box and keeps the dialog open if it isn't a valid website. Returns the checked URL.</summary>
+        private static System.Func<string> RequireValidUrl(Form f, TextBox urlBox)
+        {
+            string valid = null;
+            f.FormClosing += (s, e) =>
+            {
+                if (f.DialogResult != DialogResult.OK) return;
+                valid = Account.NormalizeUrl(urlBox.Text);
+                if (valid != null) return;
+                MessageBox.Show(f, InvalidUrlMessage, Program.AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                urlBox.Focus();
+                e.Cancel = true;
+            };
+            return () => valid;
+        }
+
         private static Form NewDialog(string title)
         {
             var f = new Form
@@ -79,22 +97,10 @@ namespace MessengerHub
                 layout.Controls.Add(Buttons(f, "Add"));
                 f.Controls.Add(layout);
 
-                string validUrl = null;
-                f.FormClosing += (s, e) =>
-                {
-                    if (f.DialogResult != DialogResult.OK) return;
-                    validUrl = Account.NormalizeUrl(urlBox.Text);
-                    if (validUrl == null)
-                    {
-                        MessageBox.Show(f, "Please enter a valid website URL (for example: discord.com).",
-                            "Messenger Hub", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        urlBox.Focus();
-                        e.Cancel = true;
-                    }
-                };
+                var checkedUrl = RequireValidUrl(f, urlBox);
 
                 if (f.ShowDialog(owner) != DialogResult.OK) return false;
-                normalizedUrl = validUrl;
+                normalizedUrl = checkedUrl();
                 customName = nameBox.Text.Trim();
                 return true;
             }
@@ -112,21 +118,9 @@ namespace MessengerHub
                 layout.Controls.Add(Buttons(f, "Save"));
                 f.Controls.Add(layout);
 
-                string validUrl = null;
-                f.FormClosing += (s, e) =>
-                {
-                    if (f.DialogResult != DialogResult.OK) return;
-                    validUrl = Account.NormalizeUrl(urlBox.Text);
-                    if (validUrl == null)
-                    {
-                        MessageBox.Show(f, "Please enter a valid website URL (for example: discord.com).",
-                            "Messenger Hub", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        urlBox.Focus();
-                        e.Cancel = true;
-                    }
-                };
+                var checkedUrl = RequireValidUrl(f, urlBox);
 
-                return f.ShowDialog(owner) == DialogResult.OK ? validUrl : null;
+                return f.ShowDialog(owner) == DialogResult.OK ? checkedUrl() : null;
             }
         }
 

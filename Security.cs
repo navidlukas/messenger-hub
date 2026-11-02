@@ -17,7 +17,7 @@ namespace MessengerHub
     ///
     /// Design:
     ///  - A random 64-byte MASTER key encrypts everything. The master key is itself stored encrypted
-    ///    with a key derived from the password (PBKDF2), so changing the password never re-encrypts data.
+    ///    with a key derived from the password (PBKDF2); the password only unwraps it.
     ///  - On exit, each account's login data (cookies, Local Storage, IndexedDB) is encrypted into a
     ///    .mhf / .mhd file beside it, and the plain copy is deleted. On launch (after the password), it
     ///    is restored. Crash-safe rule: if the plain copy is present it always wins, and the lock file
@@ -125,15 +125,6 @@ namespace MessengerHub
         }
 
         /// <summary>
-        /// Restore all login data to plain form. Accounts are processed in parallel to use all CPU cores.
-        /// </summary>
-        public void UnlockProfiles()
-        {
-            var tasks = ProfileDirs().Select(UnlockProfileDirAsync).ToArray();
-            if (tasks.Length > 0) Task.WaitAll(tasks);
-        }
-
-        /// <summary>
         /// Encrypt all login data. Called at exit, after the browser has closed.
         /// Accounts are processed in parallel; an account whose data hasn't changed since it was
         /// unlocked is skipped (its existing encrypted copy is reused).
@@ -187,7 +178,7 @@ namespace MessengerHub
             });
         }
 
-        private static long DirSize(string path)
+        internal static long DirSize(string path)
         {
             long total = 0;
             try

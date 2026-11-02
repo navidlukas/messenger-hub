@@ -5,7 +5,7 @@ namespace MessengerHub
     {
         // ---------------------------------------------------------------- Auto-naming
         // Each returns the logged-in account's number/name as a string, or null if not logged in yet.
-        // (No double-quote characters inside these scripts: \x22 is used instead.)
+        // Double quotes inside these scripts are written as \x22.
 
         /// <summary>WhatsApp Web keeps your own number in localStorage ("last-wid-md"), e.g. 971501234567:12@c.us.</summary>
         public const string WhatsAppNumber = @"
@@ -240,10 +240,11 @@ namespace MessengerHub
             if (el.closest('[class*=\x22Avatar\x22], [class*=\x22avatar\x22]')) continue;
             const txt = (el.textContent || '').trim();
             if (txt && !/^\d+(?:[.,]\d+)?[KkMm]?\+?$/.test(txt)) continue;
-            const cs = getComputedStyle(el);
-            const h = el.offsetHeight || parseFloat(cs.height) || 0;
-            const w = el.offsetWidth || parseFloat(cs.width) || 0;
+            // Size first (cheap); only badge-sized elements get the computed-style checks.
+            let h = el.offsetHeight, w = el.offsetWidth, cs = null;
+            if (!h && !w) { cs = getComputedStyle(el); h = parseFloat(cs.height) || 0; w = parseFloat(cs.width) || 0; }
             if (h < 14 || h > 30 || w < 14 || w > 80) continue;
+            if (!cs) cs = getComputedStyle(el);
             if (parseFloat(cs.borderTopLeftRadius) < 6) continue;
             if (!isShown(el) || !isColoredBadge(el, rowMuted)) continue;
             if (!rowMuted) {
@@ -295,7 +296,6 @@ namespace MessengerHub
 ";
 
         /// <summary>
-        /// <summary>
         /// Slack: scrape unread counts across IA4 navigation rail tabs, active chat unread dividers,
         /// channel sidebar / DMs list items, and document title / rail notification dots.
         /// </summary>
@@ -332,13 +332,13 @@ namespace MessengerHub
 
     // 2. IA4 Navigation Rail tab mention badges (Home, DMs, Activity, Later)
     const railTabs = document.querySelectorAll(
-      '[data-qa=""tab_dms""], [data-qa=""tab_activity""], [data-qa=""tab_home""], [data-qa=""tab_later""], ' +
-      '[data-qa^=""tab_""], .p-tab_rail [role=""tab""], .p-tab_rail button'
+      '[data-qa=\x22tab_dms\x22], [data-qa=\x22tab_activity\x22], [data-qa=\x22tab_home\x22], [data-qa=\x22tab_later\x22], ' +
+      '[data-qa^=\x22tab_\x22], .p-tab_rail [role=\x22tab\x22], .p-tab_rail button'
     );
     let railBadges = 0;
     for (let i = 0; i < railTabs.length; i++) {
       const tab = railTabs[i];
-      const badges = tab.querySelectorAll('.c-mention_badge, .p-tab_rail__tab_badge, [data-qa$=""_badge""]');
+      const badges = tab.querySelectorAll('.c-mention_badge, .p-tab_rail__tab_badge, [data-qa$=\x22_badge\x22]');
       for (let j = 0; j < badges.length; j++) {
         const b = badges[j];
         if (!isVisible(b)) continue;
@@ -358,13 +358,13 @@ namespace MessengerHub
     const sbBadges = document.querySelectorAll(
       '.p-channel_sidebar .c-mention_badge:not(.c-mention_badge--hidden), ' +
       '.p-channel_sidebar .p-channel_sidebar__badge--visible, ' +
-      '[data-qa=""channel-sidebar""] .c-mention_badge'
+      '[data-qa=\x22channel-sidebar\x22] .c-mention_badge'
     );
     let sidebarSum = 0;
     for (let i = 0; i < sbBadges.length; i++) {
       const b = sbBadges[i];
       if (!isVisible(b)) continue;
-      if (b.closest('[class*=""avatar"" i], [class*=""presence"" i]')) continue;
+      if (b.closest('[class*=\x22avatar\x22 i], [class*=\x22presence\x22 i]')) continue;
       const v = parseInt((b.textContent || '').replace(/[^0-9]/g, ''), 10);
       if (!isNaN(v) && v > 0) sidebarSum += v;
     }
@@ -372,7 +372,7 @@ namespace MessengerHub
 
     // 4. Workspace switcher badges for multi-workspace setups
     const wsBadges = document.querySelectorAll(
-      '[data-qa*=""team-button"" i] .c-mention_badge, [data-qa*=""team_button"" i] .c-mention_badge'
+      '[data-qa*=\x22team-button\x22 i] .c-mention_badge, [data-qa*=\x22team_button\x22 i] .c-mention_badge'
     );
     for (let i = 0; i < wsBadges.length; i++) {
       const b = wsBadges[i];
@@ -386,18 +386,18 @@ namespace MessengerHub
     // 5. Unread channels or DM conversations (sidebar rows or dedicated DMs list):
     // Only count conversations that are NOT currently open/selected.
     const unreadCandidates = document.querySelectorAll(
-      '.p-channel_sidebar [data-qa-channel-sidebar-channel-is-unread=""true""]:not([data-qa-channel-sidebar-channel-is-muted=""true""]):not([class*=""--selected""]):not([aria-selected=""true""]), ' +
+      '.p-channel_sidebar [data-qa-channel-sidebar-channel-is-unread=\x22true\x22]:not([data-qa-channel-sidebar-channel-is-muted=\x22true\x22]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
       '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted):not(.p-channel_sidebar__channel--selected), ' +
-      '[data-qa=""virtual-list-item""][aria-label*=""unread"" i]:not([aria-label*=""mark"" i]):not([class*=""--selected""]):not([aria-selected=""true""]), ' +
-      '[role=""listitem""][aria-label*=""unread"" i]:not([aria-label*=""mark"" i]):not([class*=""--selected""]):not([aria-selected=""true""]), ' +
-      '[role=""treeitem""][aria-label*=""unread"" i]:not([aria-label*=""mark"" i]):not([class*=""--selected""]):not([aria-selected=""true""])'
+      '[data-qa=\x22virtual-list-item\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
+      '[role=\x22listitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
+      '[role=\x22treeitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22])'
     );
     const seenRows = new Set();
     let unreadCount = 0;
     for (let i = 0; i < unreadCandidates.length; i++) {
       const el = unreadCandidates[i];
       if (!isVisible(el)) continue;
-      const row = el.closest('[data-qa=""virtual-list-item""], [role=""listitem""], [role=""treeitem""], .p-channel_sidebar__channel') || el;
+      const row = el.closest('[data-qa=\x22virtual-list-item\x22], [role=\x22listitem\x22], [role=\x22treeitem\x22], .p-channel_sidebar__channel') || el;
       if (seenRows.has(row)) continue;
       seenRows.add(row);
       unreadCount++;
@@ -410,8 +410,8 @@ namespace MessengerHub
     // so it must NEVER trigger or hold an unread badge.
     if (!isActive) {
       const activeUnreadDividers = document.querySelectorAll(
-        '[data-qa=""unread_divider""], .c-message_list__unread_divider, [class*=""unread_divider""], ' +
-        '[data-qa=""unread_pill""], [data-qa*=""unread_banner""], .c-message_list__unread_pill'
+        '[data-qa=\x22unread_divider\x22], .c-message_list__unread_divider, [class*=\x22unread_divider\x22], ' +
+        '[data-qa=\x22unread_pill\x22], [data-qa*=\x22unread_banner\x22], .c-message_list__unread_pill'
       );
       let hasActiveUnread = false;
       for (let i = 0; i < activeUnreadDividers.length; i++) {
@@ -439,11 +439,6 @@ namespace MessengerHub
     );
     for (let i = 0; i < railDots.length; i++) {
       if (isVisible(railDots[i])) return 1;
-    }
-
-    // 8. Document title unread marker prefix/suffix only when backgrounded
-    if (!isActive && (/^\s*[\*•●!]/.test(t) || /[\*•●!]\s*$/.test(t))) {
-      return 1;
     }
 
     return 0;
@@ -730,16 +725,6 @@ namespace MessengerHub
     return false;
   };
 
-  const isAudio = el => {
-    if (!el) return false;
-    try { if (el instanceof HTMLAudioElement) return true; } catch (e) {}
-    try {
-      const t = (el.tagName || el.nodeName || '').toUpperCase();
-      return t === 'AUDIO';
-    } catch (e) {}
-    return false;
-  };
-
   const nativePlay = HTMLMediaElement.prototype.play;
   const nativePause = HTMLMediaElement.prototype.pause;
 
@@ -847,24 +832,8 @@ namespace MessengerHub
   } catch (e) {
     HTMLMediaElement.prototype.play = safePlay;
   }
-  try {
-    if (window.HTMLVideoElement && HTMLVideoElement.prototype) {
-      Object.defineProperty(HTMLVideoElement.prototype, 'play', {
-        value: safePlay,
-        writable: true,
-        configurable: true
-      });
-    }
-  } catch (e) {}
 
-  try {
-    Object.defineProperty(HTMLMediaElement.prototype, 'autoplay', {
-      get() { return false; },
-      set(v) {},
-      configurable: true,
-      enumerable: true
-    });
-  } catch (e) {}
+  // Videos report autoplay as off and ignore attempts to turn it on (audio is untouched).
   try {
     if (window.HTMLVideoElement && HTMLVideoElement.prototype) {
       Object.defineProperty(HTMLVideoElement.prototype, 'autoplay', {
@@ -940,8 +909,6 @@ namespace MessengerHub
 
   window.addEventListener('play', enforceBlock, true);
   window.addEventListener('playing', enforceBlock, true);
-  document.addEventListener('play', enforceBlock, true);
-  document.addEventListener('playing', enforceBlock, true);
 
   const ensureBgStyle = () => {
     if (document.getElementById('__mh_bg_style')) return;

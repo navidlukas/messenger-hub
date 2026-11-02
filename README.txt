@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.21 (WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack, LinkedIn)
+MESSENGER HUB  v0.22 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -6,7 +6,8 @@ INSTALL (easiest)
   Windows SmartScreen shows one "unrecognized app" warning on the installer
   (the app is not code-signed): click "More info" then "Run anyway". After that
   the app and all future updates run with no warning. It installs per-user
-  (no admin) and makes a Start Menu shortcut.
+  (no admin) and makes a Start Menu shortcut. Uninstalling asks whether to also delete
+  your accounts and settings (the data folder); choose No to keep them for a reinstall.
 
 BUILD INSTEAD (optional, from source)
   1. Install the .NET SDK: https://dotnet.microsoft.com/download
@@ -17,9 +18,9 @@ USING IT
   - Left sidebar: one round icon per account, showing the messenger's own site icon
     (the one on its browser tab). Hover an icon to see the account's name.
     Until the icon is saved the first time, a colored circle with a letter shows instead
-    (W=WhatsApp, T=Telegram, M=Messenger, C=WeChat, G=Google Messages, S=Slack, L=LinkedIn).
+    (W=WhatsApp, T=Telegram, M=Messenger, G=Google Messages, S=Slack, L=LinkedIn, C=custom website).
   - Drag an icon up or down to change the order.
-  - Click "+" and choose WhatsApp, Telegram, Messenger, WeChat, Google Messages, Slack or LinkedIn to add an account.
+  - Click "+" and choose WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn or Custom... to add an account.
     After you log in, it is named automatically: phone number for WhatsApp and
     Telegram, profile name for Messenger. Names you choose yourself are never changed.
     Adding the same account twice is blocked: if a newly added WhatsApp/Telegram/Messenger

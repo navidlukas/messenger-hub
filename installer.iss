@@ -51,3 +51,20 @@ Name: "{userdesktop}\Messenger Hub"; Filename: "{app}\{#MyAppExeName}"; Tasks: d
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Messenger Hub"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Uninstall keeps your accounts by default; ask whether to delete them too.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: String;
+begin
+  if CurUninstallStep <> usPostUninstall then Exit;
+  DataDir := ExpandConstant('{app}\data');
+  if UninstallSilent or not DirExists(DataDir) then Exit;
+  if MsgBox('Also delete your accounts, logins and settings (the data folder)?' + #13#10#13#10 +
+            'Choose No to keep them for a later reinstall.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+  begin
+    DelTree(DataDir, True, True, True);
+    RemoveDir(ExpandConstant('{app}'));
+  end;
+end;

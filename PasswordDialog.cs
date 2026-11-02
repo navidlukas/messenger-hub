@@ -9,7 +9,7 @@ namespace MessengerHub
     /// <summary>The password screens shown before the main window opens.</summary>
     internal static class PasswordDialog
     {
-        private const string AppName = "Messenger Hub";
+        private const string AppName = Program.AppName;
         private const int MinLength = 8;
 
         private static Form NewForm(string title)

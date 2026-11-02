@@ -19,7 +19,7 @@ namespace MessengerHub
 {
     internal class MainForm : Form
     {
-        private const string AppName = "Messenger Hub";
+        private const string AppName = Program.AppName;
         private const string WebView2DownloadUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
 
         private static readonly Color SidebarColor = Color.FromArgb(32, 44, 51);
@@ -61,7 +61,7 @@ namespace MessengerHub
         private bool isSystemIdle;
         private DateTime? minimizedSinceUtc;
         private DateTime lastIdleCacheCheckUtc = DateTime.MinValue;
-        private readonly float scale;
+        private float scale; // updated when the window moves to a monitor with different scaling
 
         // Site icons (favicons) per messenger, saved in data\icons\<service>.png.
         private readonly Dictionary<string, Image> serviceIcons = new Dictionary<string, Image>();
@@ -126,7 +126,6 @@ namespace MessengerHub
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
-
 
         [StructLayout(LayoutKind.Sequential)]
         private struct LASTINPUTINFO
@@ -571,7 +570,7 @@ namespace MessengerHub
             dropIndicator.BringToFront();
         }
 
-        /// <summary>One menu item per supported messenger (used by "+" and App > Add account).</summary>
+        /// <summary>One menu item per supported service (used by "+" and Menu > Add account).</summary>
         private void AddServiceItems(ToolStripItemCollection items)
         {
             foreach (var service in ServiceType.All)
@@ -599,7 +598,7 @@ namespace MessengerHub
             emptyLabel.TextAlign = ContentAlignment.MiddleCenter;
             emptyLabel.ForeColor = Color.FromArgb(140, 160, 170);
             emptyLabel.Font = new Font("Segoe UI", 12f);
-            emptyLabel.Text = "No accounts yet.\nClick + on the left to add WhatsApp, Telegram or Messenger.";
+            emptyLabel.Text = "No accounts yet.\nClick + on the left to add an account.";
             emptyLabel.Visible = false;
             content.Controls.Add(emptyLabel);
         }
@@ -706,7 +705,6 @@ namespace MessengerHub
                 var acc = CreateAccount(id, service, settings.Get("Name." + id) ?? defaultName, customUrl, showBar);
                 acc.Silent = settings.Get("Silent." + id) == "1";
                 acc.Identity = settings.Get("Id." + id); // known identity, for duplicate detection
-                settings.Remove("CacheLimit." + id);
                 RefreshButton(acc);
             }
             SaveSettings();
@@ -977,7 +975,6 @@ namespace MessengerHub
             RegisterDropDown(ctx);
             acc.Button.ContextMenuStrip = ctx;
 
-
             // Keep the + button last.
             accountList.Controls.Add(acc.Button);
             accountList.Controls.SetChildIndex(addButton, accountList.Controls.Count - 1);
@@ -986,6 +983,9 @@ namespace MessengerHub
             RefreshButton(acc);
             return acc;
         }
+
+        private static readonly Font NavButtonFont = new Font("Segoe UI Symbol", 9.5f);
+        private static readonly Font AddressFont = new Font("Segoe UI", 9.5f);
 
         private Panel BuildBrowserBar(Account acc)
         {
@@ -1012,7 +1012,7 @@ namespace MessengerHub
                     Margin = new Padding(0, 0, S(2), 0),
                     BackColor = SidebarColor,
                     ForeColor = Color.FromArgb(215, 225, 230),
-                    Font = new Font("Segoe UI Symbol", 9.5f),
+                    Font = NavButtonFont,
                     TabStop = false,
                     Cursor = Cursors.Hand,
                 };
@@ -1067,7 +1067,7 @@ namespace MessengerHub
                 Dock = DockStyle.Fill,
                 BackColor = ContentColor,
                 ForeColor = Color.FromArgb(225, 235, 240),
-                Font = new Font("Segoe UI", 9.5f),
+                Font = AddressFont,
                 Text = acc.StartUrl,
             };
             acc.AddressBox.GotFocus += (s, e) => { urlFocused = true; urlBorder.Invalidate(); };
@@ -1147,7 +1147,7 @@ namespace MessengerHub
             string url = Account.NormalizeUrl(rawInput);
             if (url == null)
             {
-                MessageBox.Show(this, "Please enter a valid website URL (for example: discord.com).",
+                MessageBox.Show(this, Dialogs.InvalidUrlMessage,
                     AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 acc.AddressBox?.Focus();
                 return;
@@ -1321,7 +1321,7 @@ namespace MessengerHub
         /// After an account logs in, read who it is (phone number for WhatsApp/Telegram, profile name for
         /// Messenger). This is used to auto-name the account and to block adding the SAME account twice.
         /// Accounts you renamed keep their name; the detected identity is still recorded for the duplicate check.
-        /// WeChat and Google Messages don't expose an identity, so duplicates can't be detected for them.
+        /// Google Messages, Slack, LinkedIn and custom sites don't expose one, so duplicates can't be detected for them.
         /// </summary>
         private async Task AutoNameTickAsync()
         {
@@ -1594,16 +1594,6 @@ namespace MessengerHub
                 candidates.Add("https://" + h + "/favicon.ico");
             }
 
-            // Fallback for domains behind bot/Cloudflare challenges: returns HTTP 200 only when a real favicon
-            // exists for the domain, and HTTP 404 when none exists (which DownloadImageAsync ignores).
-            if (Uri.TryCreate(acc.StartUrl, UriKind.Absolute, out var startUri) &&
-                startUri.HostNameType == UriHostNameType.Dns && startUri.Host.Contains("."))
-            {
-                string baseDom = Account.GetBaseDomain(startUri.Host);
-                candidates.Add("https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=" +
-                               Uri.EscapeDataString("https://" + baseDom) + "&size=128");
-            }
-
             Image best = null;
             foreach (var url in candidates)
             {
@@ -1704,7 +1694,8 @@ namespace MessengerHub
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            // Only used for site icons: short timeout, and nothing larger than 2 MB is accepted.
+            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8), MaxResponseContentBufferSize = 2 * 1024 * 1024 };
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
             return client;
@@ -1880,7 +1871,6 @@ namespace MessengerHub
             catch { }
         }
 
-
         /// <summary>Background account housekeeping: compact its JS heap (rate limited per account).</summary>
         private async Task PurgeIdleAccountAsync(Account a)
         {
@@ -2043,7 +2033,13 @@ namespace MessengerHub
                     if (core == null) continue;
 
                     try { await core.Profile.ClearBrowsingDataAsync(cacheKinds); } catch { }
+                    await Task.Delay(1000); // let the browser finish removing files
                     if (IsDisposed || acc.View.IsDisposed) continue;
+
+                    // Reload only if clearing freed space; otherwise the rest is removed on exit,
+                    // so the page isn't reloaded again every 10 minutes for nothing.
+                    long after = await Task.Run(() => security.MeasureProfileCache(accId));
+                    if (after >= bytes) continue;
 
                     acc.LoadedAt = DateTime.UtcNow;
                     try { acc.View.CoreWebView2?.Reload(); } catch { }
@@ -2159,7 +2155,7 @@ namespace MessengerHub
             acc.View.Dispose();
             acc.Container?.Dispose();
 
-            foreach (var key in new[] { "Name.", "Type.", "Silent.", "Id.", "CacheLimit.", "Url.", "Bar." }) settings.Remove(key + acc.Id);
+            foreach (var key in new[] { "Name.", "Type.", "Silent.", "Id.", "Url.", "Bar." }) settings.Remove(key + acc.Id);
             SaveSettings();
             if (active == acc) SelectAccount(accounts.FirstOrDefault());
             UpdateTitle();
@@ -2423,13 +2419,37 @@ namespace MessengerHub
             tray.Icon = trayIcons[idx];
         }
 
+        private const int WM_DPICHANGED = 0x02E0;
+
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m);
+            if (m.Msg == WM_DPICHANGED)
+            {
+                int dpi = (int)((long)m.WParam & 0xFFFF);
+                if (dpi > 0 && Math.Abs(dpi / 96f - scale) > 0.001f) { scale = dpi / 96f; ApplyScale(); }
+            }
             if (WM_TASKBARBUTTONCREATED != 0 && (uint)m.Msg == WM_TASKBARBUTTONCREATED)
             {
                 UpdateTaskbarOverlay(accounts.Sum(a => a.Unread), true);
             }
+        }
+
+        /// <summary>Re-applies every DPI-dependent size (after a move to a monitor with different scaling).</summary>
+        private void ApplyScale()
+        {
+            MinimumSize = new Size(S(700), S(450));
+            sidebar.Width = S(SidebarWidth);
+            accountList.Padding = new Padding(0, S(6), 0, 0);
+            addButton.Size = new Size(S(SidebarWidth), S(ButtonHeight));
+            foreach (var a in accounts)
+            {
+                a.Button.Size = new Size(S(SidebarWidth), S(ButtonHeight));
+                if (a.BrowserBar != null) a.BrowserBar.Height = S(36);
+            }
+            dropIndicator.Height = Math.Max(2, S(2));
+            dropIndicator.Width = S(SidebarWidth) - S(8);
+            dropIndicator.Left = S(4);
         }
 
         private static IntPtr MakeTaskbarOverlayHIcon(string text)
@@ -2494,9 +2514,6 @@ namespace MessengerHub
             catch { }
         }
 
-        // Notifications are left to each messenger and the browser engine (native, with preview and
-        // its own per-site on/off), so the app no longer intercepts or shows them itself.
-
         // ------------------------------------------------------------------ Tray / closing
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
@@ -2552,7 +2569,7 @@ namespace MessengerHub
 
         private async Task ClearCacheAsync()
         {
-            long before = await Task.Run(() => FolderSize(AppPaths.Data));
+            long before = await Task.Run(() => Security.DirSize(AppPaths.Data));
 
             if (!Dialogs.ConfirmClearCache(this, FormatSize(before)))
                 return;
@@ -2580,7 +2597,7 @@ namespace MessengerHub
                 UseWaitCursor = false;
             }
 
-            long after = await Task.Run(() => FolderSize(AppPaths.Data));
+            long after = await Task.Run(() => Security.DirSize(AppPaths.Data));
             MessageBox.Show(this,
                 "Cache cleared. Your logins were kept.\n\n" +
                 "Data folder: " + FormatSize(before) + "  ->  " + FormatSize(after),
@@ -2665,12 +2682,7 @@ namespace MessengerHub
             try
             {
                 var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = ContentColor };
-                form.Controls.Add(view);
-                form.FormClosed += (s, a) =>
-                {
-                    try { view.Dispose(); } catch { }
-                    try { form.Dispose(); } catch { }
-                };
+                form.Controls.Add(view); // closing the window disposes it and the view
                 form.Show();
 
                 var options = env.CreateCoreWebView2ControllerOptions();
@@ -2760,7 +2772,7 @@ namespace MessengerHub
             (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps);
 
         // Sign-in provider domains. These are allowed to load inside any account so SSO
-        // ("Sign in with Google/Apple/Microsoft/GitHub") can complete without leaving the app.
+        // ("Sign in with Google/Apple/Microsoft") can complete without leaving the app.
         private static readonly string[] AuthDomains =
         {
             "accounts.google.com", "accounts.youtube.com",
@@ -2795,22 +2807,6 @@ namespace MessengerHub
                 Process.Start("explorer.exe", "\"" + path + "\"");
             }
             catch { }
-        }
-
-        private static long FolderSize(string path)
-        {
-            long total = 0;
-            try
-            {
-                var di = new DirectoryInfo(path);
-                if (!di.Exists) return 0;
-                foreach (var fi in di.EnumerateFiles("*", SearchOption.AllDirectories))
-                {
-                    try { total += fi.Length; } catch { }
-                }
-            }
-            catch { }
-            return total;
         }
 
         private static string FormatSize(long bytes)

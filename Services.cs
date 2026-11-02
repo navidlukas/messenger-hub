@@ -7,7 +7,7 @@ using System.Windows.Forms;
 
 namespace MessengerHub
 {
-    /// <summary>A supported messenger (WhatsApp, Telegram, Facebook Messenger).</summary>
+    /// <summary>A supported service: a messenger, LinkedIn, or a custom website.</summary>
     internal class ServiceType
     {
         public string Key;          // saved in settings.ini

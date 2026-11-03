@@ -383,15 +383,18 @@ namespace MessengerHub
 
     if (numericCount > 0) return numericCount;
 
-    // 5. Unread channels or DM conversations (sidebar rows or dedicated DMs list):
-    // Only count conversations that are NOT currently open/selected.
+    // 5. Unread channels or DM conversations (sidebar rows or dedicated DMs list).
+    // The conversation that is open counts only while this tile is in the background
+    // (while you are looking at it, it is being read).
     const unreadCandidates = document.querySelectorAll(
-      '.p-channel_sidebar [data-qa-channel-sidebar-channel-is-unread=\x22true\x22]:not([data-qa-channel-sidebar-channel-is-muted=\x22true\x22]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
-      '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted):not(.p-channel_sidebar__channel--selected), ' +
-      '[data-qa=\x22virtual-list-item\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
-      '[role=\x22listitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22]), ' +
-      '[role=\x22treeitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]):not([class*=\x22--selected\x22]):not([aria-selected=\x22true\x22])'
+      '.p-channel_sidebar [data-qa-channel-sidebar-channel-is-unread=\x22true\x22]:not([data-qa-channel-sidebar-channel-is-muted=\x22true\x22]), ' +
+      '.p-channel_sidebar__channel--unread:not(.p-channel_sidebar__channel--muted), ' +
+      '[data-qa=\x22virtual-list-item\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]), ' +
+      '[role=\x22listitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i]), ' +
+      '[role=\x22treeitem\x22][aria-label*=\x22unread\x22 i]:not([aria-label*=\x22mark\x22 i])'
     );
+    const isSelected = el => !!el && (el.getAttribute('aria-selected') === 'true' ||
+      /--selected\b/.test(el.className || '') || !!el.querySelector('[aria-selected=\x22true\x22], [class*=\x22--selected\x22]'));
     const seenRows = new Set();
     let unreadCount = 0;
     for (let i = 0; i < unreadCandidates.length; i++) {
@@ -400,6 +403,7 @@ namespace MessengerHub
       const row = el.closest('[data-qa=\x22virtual-list-item\x22], [role=\x22listitem\x22], [role=\x22treeitem\x22], .p-channel_sidebar__channel') || el;
       if (seenRows.has(row)) continue;
       seenRows.add(row);
+      if (isActive && (isSelected(el) || isSelected(row))) continue;
       unreadCount++;
     }
 
@@ -423,7 +427,7 @@ namespace MessengerHub
           break;
         }
       }
-      if (hasActiveUnread) {
+      if (hasActiveUnread && unreadCount === 0) {
         unreadCount++;
       } else if (unreadCount === 0 && (/^\s*[\*•●!]/.test(t) || /[\*•●!]\s*$/.test(t))) {
         // Document title marker while backgrounded

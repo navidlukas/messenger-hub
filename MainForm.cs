@@ -1736,17 +1736,9 @@ namespace MessengerHub
                 ConfigureCore(core, acc);
                 EnableTrackingPrevention(acc); // ad/tracker blocking on by default, before the first navigation
 
-                // Ensure persistent storage and notifications are permanently granted so logins persist and badges update.
-                try
-                {
-                    if (Uri.TryCreate(acc.StartUrl, UriKind.Absolute, out var startUri))
-                    {
-                        string origin = startUri.GetLeftPart(UriPartial.Authority);
-                        _ = core.Profile.SetPermissionStateAsync(CoreWebView2PermissionKind.PersistentStorage, origin, CoreWebView2PermissionState.Allow);
-                        _ = core.Profile.SetPermissionStateAsync(CoreWebView2PermissionKind.Notifications, origin, CoreWebView2PermissionState.Allow);
-                    }
-                }
-                catch { }
+                // Persistent storage (so logins stay) and, unless you already chose, notifications.
+                if (Uri.TryCreate(acc.StartUrl, UriKind.Absolute, out var startUri))
+                    _ = GrantDefaultPermissionsAsync(core, startUri.GetLeftPart(UriPartial.Authority));
 
                 // Block high-volume telemetry, analytics, and ad-beacon requests at the native browser layer.
                 foreach (var pattern in BlockedResourcePatterns)
@@ -1848,6 +1840,26 @@ namespace MessengerHub
                 // Still open the page, so the tile is never left blank.
                 try { if (!acc.View.IsDisposed) acc.View.CoreWebView2?.Navigate(acc.StartUrl); } catch { }
             }
+        }
+
+        /// <summary>
+        /// Always allows persistent storage. Allows notifications only when the account has no saved choice yet,
+        /// so a "Block" chosen on a notification pop-up is kept across restarts.
+        /// </summary>
+        private static async Task GrantDefaultPermissionsAsync(CoreWebView2 core, string origin)
+        {
+            try
+            {
+                var profile = core.Profile;
+                await profile.SetPermissionStateAsync(CoreWebView2PermissionKind.PersistentStorage, origin, CoreWebView2PermissionState.Allow);
+
+                var saved = await profile.GetNonDefaultPermissionSettingsAsync();
+                bool chosen = saved.Any(p => p.PermissionKind == CoreWebView2PermissionKind.Notifications &&
+                    string.Equals((p.PermissionOrigin ?? "").TrimEnd('/'), origin.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+                if (!chosen)
+                    await profile.SetPermissionStateAsync(CoreWebView2PermissionKind.Notifications, origin, CoreWebView2PermissionState.Allow);
+            }
+            catch { }
         }
 
         /// <summary>Scripts that run on every page of an account. Safe to add twice (each guards itself).</summary>

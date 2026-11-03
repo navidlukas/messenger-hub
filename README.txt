@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.25 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
+MESSENGER HUB  v0.26 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -31,6 +31,7 @@ USING IT
     The same options are in the top menu under "Account" (for the selected account).
   - Notifications are handled by each messenger itself (native pop-ups with preview); turn an
     individual one on/off from its own notification settings or the gear on its pop-up.
+    A "Block" chosen on that gear is kept after restarting.
   - Menu > Silent (also on the tray right-click) mutes ALL accounts at once; turn it off
     to restore each account's own setting. It mutes sound only; the red dot still shows. The tray icon shows a crescent-moon badge while on.
   - Downloads: you are asked where to save each file.

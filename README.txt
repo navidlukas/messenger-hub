@@ -31,7 +31,7 @@ USING IT
     The same options are in the top menu under "Account" (for the selected account).
   - Notifications are handled by each messenger itself (native pop-ups with preview); turn an
     individual one on/off from its own notification settings or the gear on its pop-up.
-    A "Block" chosen on that gear is kept after restarting.
+    A "Block" chosen on that gear is kept after restarting. Telegram pop-ups are shown too.
   - Menu > Silent (also on the tray right-click) mutes ALL accounts at once; turn it off
     to restore each account's own setting. It mutes sound only; the red dot still shows. The tray icon shows a crescent-moon badge while on.
   - Downloads: you are asked where to save each file.
@@ -54,6 +54,8 @@ USING IT
     A custom site must ask before using your microphone, camera or clipboard (the messengers
     are allowed automatically).
   - Menu > Clear cache...  deletes cached media but KEEPS your logins.
+  - If the browser engine inside the app ever stops (all tiles go blank), it is started again
+    automatically and every account reloads, without asking for the password.
   - If a tile ever fails to start, it is retried automatically and the reason is written to
     data\startup.log (kept under 100 KB). Right-click > Reload also restarts a blank tile.
   - Menu > Reset Messenger Hub...  removes all accounts and settings (back to defaults).

@@ -720,19 +720,7 @@ namespace MessengerHub
 
             try
             {
-                // One shared browser engine with background optimization flags; each account gets its own profile.
-                var envOptions = new CoreWebView2EnvironmentOptions
-                {
-                    AdditionalBrowserArguments = "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
-                                                 "--enable-features=SubframeShutdownDelay " +
-                                                 "--disable-background-timer-throttling " +
-                                                 "--disable-sync " +
-                                                 "--disable-component-update " +
-                                                 "--disable-domain-reliability " +
-                                                 "--disable-gpu-shader-disk-cache " +
-                                                 "--js-flags=\"--optimize-for-size\""
-                };
-                env = await CoreWebView2Environment.CreateAsync(null, AppPaths.WebView, envOptions);
+                env = await CreateEnvironmentAsync();
             }
             catch (WebView2RuntimeNotFoundException)
             {
@@ -783,6 +771,109 @@ namespace MessengerHub
             // Compact managed heap and release startup working-set pages back to the OS.
             TrimProcessMemory();
         }
+
+        /// <summary>One shared browser engine with background optimization flags; each account gets its own profile.</summary>
+        private static Task<CoreWebView2Environment> CreateEnvironmentAsync()
+        {
+            var options = new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
+                                             "--disable-background-timer-throttling " +
+                                             "--disable-sync " +
+                                             "--disable-component-update " +
+                                             "--disable-domain-reliability " +
+                                             "--disable-gpu-shader-disk-cache " +
+                                             "--js-flags=\"--optimize-for-size\""
+            };
+            return CoreWebView2Environment.CreateAsync(null, AppPaths.WebView, options);
+        }
+
+        // ------------------------------------------------------------------ Browser engine recovery
+
+        private bool recoveringBrowser;
+        private DateTime lastBrowserRecoveryUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// The whole browser engine stopped (every account goes blank). Start a new one and reload every
+        /// account in place, without asking for the password again. Only once per 5 minutes, so it can't loop.
+        /// </summary>
+        private void OnBrowserProcessExited()
+        {
+            if (recoveringBrowser || reallyExit || resetting || IsDisposed) return;
+            recoveringBrowser = true;
+
+            if (DateTime.UtcNow - lastBrowserRecoveryUtc < TimeSpan.FromMinutes(5))
+            {
+                Diag.Write("browser engine stopped again within 5 minutes; not restarting it");
+                MessageBox.Show(this,
+                    "The browser engine inside Messenger Hub stopped twice in a few minutes.\n\n" +
+                    "Please close Messenger Hub (Menu > Exit) and open it again.",
+                    AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return; // stays "recovering" so the message isn't repeated
+            }
+
+            lastBrowserRecoveryUtc = DateTime.UtcNow;
+            BeginInvoke((Action)(async () => await RecoverBrowserAsync()));
+        }
+
+        private async Task RecoverBrowserAsync()
+        {
+            Diag.Write("browser engine stopped; starting a new one");
+            try
+            {
+                env = null;
+                foreach (var acc in accounts) ReplaceView(acc);
+                await Task.Delay(1500); // let the old engine finish exiting
+                if (IsDisposed || reallyExit) return;
+
+                env = await CreateEnvironmentAsync();
+                var first = active;
+                if (first != null) await InitAccountAsync(first);
+                foreach (var acc in accounts.ToList())
+                {
+                    if (acc == first) continue;
+                    await Task.Delay(500);
+                    if (IsDisposed || reallyExit) return;
+                    await InitAccountAsync(acc);
+                }
+                StartStartupWatchdog();
+                UpdateIdentityTimerState();
+                UpdateUnreadTimerState();
+            }
+            catch (Exception ex)
+            {
+                Diag.Write("browser engine restart failed: " + ex.Message);
+            }
+            finally
+            {
+                recoveringBrowser = false;
+            }
+        }
+
+        /// <summary>Swaps an account's dead browser view for a fresh one in the same place.</summary>
+        private void ReplaceView(Account acc)
+        {
+            var old = acc.View;
+            var view = NewWebView(old.Visible);
+            var parent = old.Parent;
+            if (parent != null)
+            {
+                int index = parent.Controls.GetChildIndex(old);
+                parent.Controls.Remove(old);
+                parent.Controls.Add(view);
+                parent.Controls.SetChildIndex(view, index);
+            }
+            acc.View = view;
+            acc.ResetForNewBrowser();
+            try { old.Dispose(); } catch { }
+        }
+
+        private static WebView2 NewWebView(bool visible) => new WebView2
+        {
+            Dock = DockStyle.Fill,
+            DefaultBackgroundColor = ContentColor,
+            Visible = visible,
+        };
 
         // ------------------------------------------------------------------ Startup load recovery
 
@@ -936,12 +1027,7 @@ namespace MessengerHub
                 ShowAddressBar = showAddressBar,
             };
 
-            acc.View = new WebView2
-            {
-                Dock = DockStyle.Fill,
-                DefaultBackgroundColor = ContentColor,
-                Visible = acc.IsCustom,
-            };
+            acc.View = NewWebView(acc.IsCustom);
 
             if (acc.IsCustom)
             {
@@ -1776,6 +1862,11 @@ namespace MessengerHub
                     if (e.IsSuccess)
                     {
                         acc.LoadedAt = DateTime.UtcNow;
+                        if (!acc.FirstLoadOk && !IsForeground(acc))
+                        {
+                            // Low-memory mode only once the first page has finished loading.
+                            try { core.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Low; } catch { }
+                        }
                         acc.FirstLoadOk = true;
                         UpdateUnread(acc, core.DocumentTitle);
                     }
@@ -1790,6 +1881,11 @@ namespace MessengerHub
                 {
                     if (acc.View.IsDisposed) return;
                     Diag.Write("browser process failed for " + acc.Name + ": " + e.ProcessFailedKind);
+                    if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
+                    {
+                        OnBrowserProcessExited(); // the whole engine is gone: a reload can't help
+                        return;
+                    }
                     if (DateTime.UtcNow - acc.LastRecoverUtc < TimeSpan.FromSeconds(20)) return;
                     acc.LastRecoverUtc = DateTime.UtcNow;
                     try { acc.View.CoreWebView2?.Reload(); } catch { }
@@ -1869,6 +1965,8 @@ namespace MessengerHub
             await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BlockVideoAutoplay);      // videos/GIFs only play when clicked
             if (acc.Service == ServiceType.WhatsApp)
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.EnableWhatsAppBackgroundSync);
+            if (acc.Service == ServiceType.Telegram) // its pop-ups go through a service worker, which WebView2 can't show
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.ServiceWorkerNotificationsToPage);
             if (acc.Service.UnreadScript != null) // push unread changes immediately instead of waiting for the poll
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(Scripts.BuildUnreadPushScript(acc.Service.UnreadScript));
         }
@@ -1998,7 +2096,8 @@ namespace MessengerHub
                 bool fg = !isSystemIdle && visibleActive;
                 try
                 {
-                    core.MemoryUsageTargetLevel = fg
+                    // A page that is still loading for the first time stays in normal mode.
+                    core.MemoryUsageTargetLevel = fg || !a.FirstLoadOk
                         ? CoreWebView2MemoryUsageTargetLevel.Normal
                         : CoreWebView2MemoryUsageTargetLevel.Low;
                 }
@@ -2583,6 +2682,7 @@ namespace MessengerHub
                 return;
             }
 
+            reallyExit = true; // closing for good (also on Windows shutdown): don't treat the engine stopping as a crash
             SetEfficiencyMode(false);
             if (!resetting)
             {

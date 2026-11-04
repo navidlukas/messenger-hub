@@ -941,6 +941,54 @@ namespace MessengerHub
 ";
 
         /// <summary>
+        /// WebView2 only shows pop-ups created with new Notification(...); it drops the ones a site sends
+        /// through its service worker (Telegram does). This turns both service-worker routes into a
+        /// normal page notification: registration.showNotification(...) and Telegram's
+        /// 'showMessageNotification' message to its worker.
+        /// </summary>
+        public const string ServiceWorkerNotificationsToPage = @"
+(() => {
+  if (window !== window.top || window.__mhSwNotify || typeof Notification === 'undefined') return;
+  window.__mhSwNotify = true;
+
+  const show = (title, opts) => {
+    try {
+      if (Notification.permission !== 'granted') return;
+      const o = Object.assign({}, opts || {});
+      delete o.actions; // only allowed on service-worker notifications
+      const n = new Notification(title || document.title || 'Telegram', o);
+      n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
+    } catch (e) {}
+  };
+
+  try {
+    if (window.ServiceWorkerRegistration) {
+      ServiceWorkerRegistration.prototype.showNotification = function (title, opts) {
+        show(title, opts);
+        return Promise.resolve();
+      };
+    }
+  } catch (e) {}
+
+  try {
+    if (window.ServiceWorker) {
+      const post = ServiceWorker.prototype.postMessage;
+      ServiceWorker.prototype.postMessage = function (msg) {
+        try {
+          if (msg && msg.type === 'showMessageNotification' && msg.payload) {
+            const p = msg.payload;
+            show(p.title, { body: p.body || '', icon: p.icon, tag: p.tag || (p.messageId != null ? String(p.messageId) : undefined), silent: !!p.isSilent });
+            return;
+          }
+        } catch (e) {}
+        return post.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+})();
+";
+
+        /// <summary>
         /// Builds an event-driven MutationObserver script that pushes unread count changes to the host
         /// immediately via postMessage('__mh_unread:' + n). Runs ONLY in the top frame so child iframes
         /// never overwrite the unread count with 0, and uses leading-edge execution (at most once a second, once every 5 s for tabs that are not active).

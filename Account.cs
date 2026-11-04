@@ -25,8 +25,7 @@ namespace MessengerHub
         public int Unread;
         public DateTime LoadedAt = DateTime.UtcNow; // last full page load (stuck-page checks wait a moment after it)
         public bool InitStarted;                     // true once WebView2 initialization has been started
-        public readonly TaskCompletionSource<bool> FirstNavDone =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> FirstNavDone = NewNavSignal();
         public bool? SentActive;                     // last "is this tab active" value sent to the page (null = not sent since load)
         public int IdentityMisses;                   // identity checks that found no logged-in name (for back-off)
         public DateTime IdentityNextUtc = DateTime.MinValue; // next identity check allowed
@@ -45,6 +44,20 @@ namespace MessengerHub
         public Button ForwardButton;
 
         public bool IsCustom => Service == ServiceType.Custom;
+
+        private static TaskCompletionSource<bool> NewNavSignal() =>
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Clears the per-browser state after the browser engine was restarted (a new view is about to start).</summary>
+        public void ResetForNewBrowser()
+        {
+            InitStarted = false;
+            FirstLoadOk = false;
+            StartupReloads = 0;
+            SentActive = null;
+            IdleBgApplied = false;
+            FirstNavDone = NewNavSignal();
+        }
         public Control HostControl => (Control)Container ?? View;
         public string StartUrl => IsCustom && !string.IsNullOrEmpty(CustomUrl) ? CustomUrl : Service.Url;
 

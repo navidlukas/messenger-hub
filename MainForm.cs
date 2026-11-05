@@ -780,6 +780,8 @@ namespace MessengerHub
         private Task<CoreWebView2Environment> CreateEnvironmentAsync()
         {
             secureDnsInUse = string.Join(", ", SecureDns.CurrentOrder(settings));
+            SecureDns.ApplyToLocalState(settings); // the browser's own secure-DNS setting
+
             var options = new CoreWebView2EnvironmentOptions
             {
                 AdditionalBrowserArguments = SecureDns.BrowserArgument(settings) + " " +

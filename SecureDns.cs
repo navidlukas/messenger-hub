@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace MessengerHub
@@ -59,6 +61,41 @@ namespace MessengerHub
                 CurrentOrder(settings).Select(n => Servers.First(s => s.Name == n).Template));
             // Feature parameters are URL-escaped; Fallback/false = secure mode (never plain DNS).
             return "--enable-features=DnsOverHttps:Fallback/false/Templates/" + Uri.EscapeDataString(templates);
+        }
+
+        // The browser's own secure-DNS setting (the same one Edge's "Use secure DNS" option saves) in "Local State".
+        private static readonly Regex DohPref = new Regex(@",?\s*""dns_over_https""\s*:\s*\{(?:[^{}""]|""(?:[^""\\]|\\.)*"")*\}", RegexOptions.Compiled);
+
+        /// <summary>
+        /// Before the browser engine starts: writes "secure DNS: strict, these servers" into its Local State file.
+        /// (On the very first run the file doesn't exist yet; it then applies from the next start.)
+        /// </summary>
+        public static void ApplyToLocalState(Settings settings)
+        {
+            try
+            {
+                string path = AppPaths.LocalStateFile;
+                if (!File.Exists(path)) return;
+                string text = File.ReadAllText(path);
+                int brace = text.IndexOf('{');
+                if (brace < 0) return;
+
+                string templates = string.Join(" ",
+                    CurrentOrder(settings).Select(n => Servers.First(s => s.Name == n).Template));
+                string pref = "\"dns_over_https\":{\"mode\":\"secure\",\"templates\":\"" + templates + "\"}";
+
+                string without = DohPref.Replace(text, "").Replace("{,", "{");
+                brace = without.IndexOf('{');
+                bool emptyObject = without.Substring(brace + 1).TrimStart().StartsWith("}");
+                string updated = without.Substring(0, brace + 1) + pref + (emptyObject ? "" : ",") + without.Substring(brace + 1);
+                if (updated == text) return;
+
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, updated);
+                File.Copy(tmp, path, true);
+                File.Delete(tmp);
+            }
+            catch (Exception ex) { Diag.Write("secure DNS setting not written: " + ex.Message); }
         }
 
         /// <summary>

@@ -2473,9 +2473,8 @@ namespace MessengerHub
 
         // ------------------------------------------------------------------ Unread counts & notifications
 
-        // Messengers put the unread count in the page title, e.g. "(3) WhatsApp", "(*2) Slack", or "* Slack".
+        // Messengers put the unread count in the page title, e.g. "(3) WhatsApp".
         private static readonly Regex UnreadPattern = new Regex(@"\(\*?(\d+)\+?\)", RegexOptions.Compiled);
-        private static readonly Regex UnreadMarkerPattern = new Regex(@"(?:^\s*|[\|\-]\s*)[\*•●!]|[\*•●!]\s*(?:Slack|[A-Z])", RegexOptions.Compiled);
 
         private void UpdateUnreadTimerState()
         {
@@ -2526,10 +2525,9 @@ namespace MessengerHub
 
         private void UpdateUnread(Account acc, string title)
         {
+            if (acc.Service.NoUnreadBadge) return; // e.g. Slack: no badge at all
             var m = UnreadPattern.Match(title ?? "");
             int titleUnread = m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
-            if (titleUnread == 0 && acc.Service == ServiceType.Slack && !string.IsNullOrEmpty(title) && UnreadMarkerPattern.IsMatch(title))
-                titleUnread = 1;
 
             if (acc.Service.UnreadScript != null)
             {

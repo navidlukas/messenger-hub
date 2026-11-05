@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.26 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
+MESSENGER HUB  v0.27 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -38,6 +38,7 @@ USING IT
   - Ad/tracker blocking is always on: every account uses the browser engine's built-in
     tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).
   - The tray icon shows a red dot (top-right) whenever any account has an unread message.
+    Slack shows no unread badge (its unread state can't be read reliably); its pop-ups still work.
   - The X button hides the app to the system tray. Tray icon > right-click > Exit to quit.
   - Saving RAM/CPU: background accounts use low-memory mode, compact their memory every
     10 minutes, and videos/GIFs only play when you click them. When the app is hidden or

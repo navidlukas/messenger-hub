@@ -21,6 +21,7 @@ namespace MessengerHub
         public string IdentityScript; // returns the logged-in phone number / name, or null (auto-naming)
         public string UnreadScript;   // returns the unread count from the DOM; null = read it from the tab title
         public string ReadyScript;    // returns 'true' when the page is usable; null = fall back to a text check
+        public bool NoUnreadBadge;    // never show an unread badge (its unread state can't be read reliably)
 
         public static readonly ServiceType WhatsApp = new ServiceType
         {
@@ -85,7 +86,7 @@ namespace MessengerHub
             Color = Color.FromArgb(74, 21, 75),
             Letter = "S",
             AllowPopups = true, // let Slack's SSO sign-in popups open inside the app
-            UnreadScript = Scripts.SlackUnread, // its tab title doesn't carry the unread count reliably
+            NoUnreadBadge = true, // Slack's unread state can't be read reliably from the page
             ReadyScript = Scripts.SlackReady,
         };
 

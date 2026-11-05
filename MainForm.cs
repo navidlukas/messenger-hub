@@ -472,7 +472,8 @@ namespace MessengerHub
             var help = new ToolStripMenuItem("&Help");
             help.DropDownItems.Add("Open &data folder", null, (s, e) => OpenFolder(AppPaths.Data));
             help.DropDownItems.Add("&About", null, (s, e) => MessageBox.Show(this,
-                AppName + " " + Application.ProductVersion + "\n\nPortable mode: all data is stored in\n" + AppPaths.Data,
+                AppName + " " + Application.ProductVersion + "\n\nPortable mode: all data is stored in\n" + AppPaths.Data +
+                "\n\nSecure DNS (strict): " + (secureDnsInUse ?? "starting...") + "\n(fastest first; re-checked daily, applied at next start)",
                 AppName, MessageBoxButtons.OK, MessageBoxIcon.Information));
 
             // Shows each account's current cache size, measured fresh each time it's opened.
@@ -765,19 +766,24 @@ namespace MessengerHub
             // once; reload any that are still stuck a short time after startup (once each).
             StartStartupWatchdog();
 
-            // Check for a new version in the background (silent, at most once a week).
+            // Check for a new version (weekly) and time the secure-DNS servers (daily), in the background.
             Updater.StartBackgroundCheck();
+            CheckSecureDns();
 
             // Compact managed heap and release startup working-set pages back to the OS.
             TrimProcessMemory();
         }
 
         /// <summary>One shared browser engine with background optimization flags; each account gets its own profile.</summary>
-        private static Task<CoreWebView2Environment> CreateEnvironmentAsync()
+        private string secureDnsInUse; // shown in Help > About
+
+        private Task<CoreWebView2Environment> CreateEnvironmentAsync()
         {
+            secureDnsInUse = string.Join(", ", SecureDns.CurrentOrder(settings));
             var options = new CoreWebView2EnvironmentOptions
             {
-                AdditionalBrowserArguments = "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
+                AdditionalBrowserArguments = SecureDns.BrowserArgument(settings) + " " +
+                                             "--disable-features=Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess,BackForwardCache,InterestFeedContentSuggestions,AutofillServerCommunication,CalculateNativeWinOcclusion,MemorySaverModeRenderTuning " +
                                              "--disable-background-timer-throttling " +
                                              "--disable-sync " +
                                              "--disable-component-update " +
@@ -2122,9 +2128,24 @@ namespace MessengerHub
         /// <summary>Hourly nudge for the update check, which itself only runs once a week.</summary>
         private void UpdateCheckTick()
         {
-            // Cheap no-op until the weekly update check is due. Memory is trimmed on idle/minimize, not here.
+            // Cheap no-ops until the weekly update check / daily secure-DNS timing is due.
             Updater.StartBackgroundCheck();
+            CheckSecureDns();
         }
+
+        /// <summary>Times the secure-DNS servers (daily, in the background) and saves the fastest for the next start.</summary>
+        private void CheckSecureDns() => SecureDns.CheckIfDue(settings, order =>
+        {
+            try
+            {
+                BeginInvoke((Action)(() =>
+                {
+                    SecureDns.Save(settings, order);
+                    settings.Save(AppPaths.SettingsFile);
+                }));
+            }
+            catch { }
+        });
 
         private async Task IdleMonitorTickAsync()
         {

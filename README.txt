@@ -35,6 +35,10 @@ USING IT
   - Menu > Silent (also on the tray right-click) mutes ALL accounts at once; turn it off
     to restore each account's own setting. It mutes sound only; the red dot still shows. The tray icon shows a crescent-moon badge while on.
   - Downloads: you are asked where to save each file.
+  - Secure DNS: every account looks up websites over encrypted DNS (DNS over HTTPS), strict mode,
+    never plain DNS. The app times Cloudflare, Ali DNS, Google, Control D, AdGuard, NextDNS and
+    Quad9 once a day in the background and uses the fastest (plus the next two as backups) from the
+    next start. Help > About shows which are in use.
   - Ad/tracker blocking is always on: every account uses the browser engine's built-in
     tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).
   - The tray icon shows a red dot (top-right) whenever any account has an unread message.

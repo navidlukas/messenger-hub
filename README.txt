@@ -1,4 +1,4 @@
-MESSENGER HUB  v0.28 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
+MESSENGER HUB  v0.29 (WhatsApp, Telegram, Messenger, Google Messages, Slack, LinkedIn, custom websites)
 =============================================================
 
 INSTALL (easiest)
@@ -37,8 +37,8 @@ USING IT
   - Downloads: you are asked where to save each file.
   - Secure DNS: every account looks up websites over encrypted DNS (DNS over HTTPS), strict mode,
     never plain DNS. The app times Cloudflare, Ali DNS, Google, Control D, AdGuard, NextDNS and
-    Quad9 once a day in the background and uses the fastest (plus the next two as backups) from the
-    next start. Help > About shows which are in use.
+    Quad9 once a day in the background and uses all seven, fastest first (the others are backups),
+    from the next start. Help > About shows the order.
   - Ad/tracker blocking is always on: every account uses the browser engine's built-in
     tracking prevention (blocks tracker and ad-network domains; not in-feed sponsored posts).
   - The tray icon shows a red dot (top-right) whenever any account has an unread message.

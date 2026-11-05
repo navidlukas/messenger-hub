@@ -12,7 +12,7 @@ namespace MessengerHub
     /// <summary>
     /// Secure DNS (DNS over HTTPS) for the browser engine, in strict mode: lookups are never sent unencrypted.
     /// About once a day the app times every server below and keeps the fastest working ones; the browser
-    /// uses the fastest first and the next two as backups. The order is saved, so startup is never slowed.
+    /// uses all seven, fastest first (the others are backups). The order is saved, so startup is never slowed.
     /// </summary>
     internal static class SecureDns
     {
@@ -36,22 +36,21 @@ namespace MessengerHub
 
         private const string OrderKey = "SecureDns";            // fastest first, e.g. "Google,Cloudflare,Quad9"
         private const string CheckedKey = "SecureDnsChecked";   // when the servers were last timed (UTC, round-trip format)
-        private const int UseCount = 3;                         // fastest + two backups
         private static readonly TimeSpan CheckEvery = TimeSpan.FromDays(1);
-        private static readonly string[] DefaultOrder = { "Cloudflare", "Google", "Quad9" };
 
         private static int running;
 
-        /// <summary>The servers in use, fastest first (the saved order, or the default before the first timing).</summary>
+        /// <summary>
+        /// All seven servers, fastest first: the saved timing order, then any server it doesn't list
+        /// (e.g. one that didn't answer the last timing) in the list order above.
+        /// </summary>
         public static string[] CurrentOrder(Settings settings)
         {
-            var names = (settings.Get(OrderKey) ?? "")
+            var saved = (settings.Get(OrderKey) ?? "")
                 .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(n => n.Trim())
-                .Where(n => Servers.Any(s => s.Name == n))
-                .Take(UseCount)
-                .ToArray();
-            return names.Length > 0 ? names : DefaultOrder;
+                .Where(n => Servers.Any(s => s.Name == n));
+            return saved.Concat(Servers.Select(s => s.Name)).Distinct().ToArray();
         }
 
         /// <summary>Browser command-line switch that turns on strict DNS over HTTPS with the current servers.</summary>
@@ -117,7 +116,7 @@ namespace MessengerHub
                     var fastest = timings.Where(t => t.Ms < double.MaxValue).OrderBy(t => t.Ms).ToList();
                     Diag.Write("secure DNS timing: " + (fastest.Count == 0 ? "no server answered" :
                         string.Join(", ", fastest.Select(t => t.Name + " " + Math.Round(t.Ms) + " ms"))));
-                    if (fastest.Count > 0) onResult(string.Join(",", fastest.Take(UseCount).Select(t => t.Name)));
+                    if (fastest.Count > 0) onResult(string.Join(",", fastest.Select(t => t.Name))); // the rest follow at the end
                 }
                 catch (Exception ex) { Diag.Write("secure DNS timing failed: " + ex.Message); }
                 finally { System.Threading.Interlocked.Exchange(ref running, 0); }

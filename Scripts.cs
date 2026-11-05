@@ -203,34 +203,49 @@ namespace MessengerHub
                        document.querySelector('#LeftColumn') ||
                        document.querySelector('.chat-list');
 
-      // 2a) Legacy global .ChatBadge classes
-      const legacyBadges = (leftRoot || document).querySelectorAll('.chat-list .ChatBadge.unread:not(.muted)');
-      if (legacyBadges.length > 0 || document.querySelector('.ChatBadge')) {
-        for (let i = 0; i < legacyBadges.length; i++) {
-          const el = legacyBadges[i];
-          if (el.closest('.ArchivedChats, [id*=\x22archive\x22 i]')) continue;
-          const v = parseNum(el.textContent);
-          total += v > 0 ? v : 1;
-        }
-        const mentions = (leftRoot || document).querySelectorAll('.chat-list .ChatBadge.unread-mentions');
-        for (let i = 0; i < mentions.length; i++) {
-          const el = mentions[i];
-          if (el.closest('.ArchivedChats, [id*=\x22archive\x22 i]')) continue;
-          const row = el.closest('.ListItem, .Chat, .chat-item-clickable');
-          if (!row || !row.querySelector('.ChatBadge.unread:not(.muted)')) total += 1;
-        }
-      } else if (leftRoot) {
-        // 2b) Modern CSS-Modules Telegram Web A: inspect chat rows structurally + computed badge color
+      const scope = leftRoot || document;
+      const archived = el => !!el.closest('.ArchivedChats, [class*=\x22Archive\x22], [id*=\x22archive\x22 i]');
+
+      // 2a) .ChatBadge classes, anywhere in the chat list
+      const badges = scope.querySelectorAll('.ChatBadge.unread:not(.muted)');
+      for (let i = 0; i < badges.length; i++) {
+        const el = badges[i];
+        if (archived(el) || !isShown(el)) continue;
+        const v = parseNum(el.textContent);
+        total += v > 0 ? v : 1;
+      }
+      const mentions = scope.querySelectorAll('.ChatBadge.unread-mentions');
+      for (let i = 0; i < mentions.length; i++) {
+        const el = mentions[i];
+        if (archived(el) || !isShown(el)) continue;
+        const row = el.closest('.ListItem, .Chat, .chat-item-clickable');
+        if (!row || !row.querySelector('.ChatBadge.unread:not(.muted)')) total += 1;
+      }
+
+      // 2b) Nothing found that way (newer builds): look at the chat rows themselves. A badge is a small,
+      // rounded, colored element holding a number; the number may sit in a plain element inside it.
+      if (total === 0 && leftRoot) {
+        const isBadgeBox = (el, rowMuted) => {
+          // Size first (cheap); only badge-sized elements get the computed-style checks.
+          let h = el.offsetHeight, w = el.offsetWidth, cs = null;
+          if (!h && !w) { cs = getComputedStyle(el); h = parseFloat(cs.height) || 0; w = parseFloat(cs.width) || 0; }
+          if (h < 14 || h > 30 || w < 14 || w > 80) return false;
+          if (!cs) cs = getComputedStyle(el);
+          if (parseFloat(cs.borderTopLeftRadius) < 6) return false;
+          return isShown(el) && isColoredBadge(el, rowMuted);
+        };
+
         const rows = leftRoot.querySelectorAll('.ListItem.Chat, .chat-item-clickable, .ListItem[data-peer-id], [class*=\x22chat-item-clickable\x22]');
         const seen = new Set();
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i];
-          if (row.closest('.ArchivedChats, [class*=\x22Archive\x22], [id*=\x22archive\x22 i]')) continue;
+          if (archived(row)) continue;
           const a = row.querySelector('a[href*=\x22#\x22]');
           const key = row.getAttribute('data-peer-id') || (a && a.getAttribute('href')) || '';
           if (key) { if (seen.has(key)) continue; seen.add(key); }
 
           const rowMuted = !!row.querySelector('.icon-muted, [class*=\x22icon-muted\x22]');
+          const counted = new Set();
           let rowCount = 0;
 
           const nodes = row.querySelectorAll('div, span');
@@ -240,13 +255,14 @@ namespace MessengerHub
             if (el.closest('[class*=\x22Avatar\x22], [class*=\x22avatar\x22]')) continue;
             const txt = (el.textContent || '').trim();
             if (txt && !/^\d+(?:[.,]\d+)?[KkMm]?\+?$/.test(txt)) continue;
-            // Size first (cheap); only badge-sized elements get the computed-style checks.
-            let h = el.offsetHeight, w = el.offsetWidth, cs = null;
-            if (!h && !w) { cs = getComputedStyle(el); h = parseFloat(cs.height) || 0; w = parseFloat(cs.width) || 0; }
-            if (h < 14 || h > 30 || w < 14 || w > 80) continue;
-            if (!cs) cs = getComputedStyle(el);
-            if (parseFloat(cs.borderTopLeftRadius) < 6) continue;
-            if (!isShown(el) || !isColoredBadge(el, rowMuted)) continue;
+
+            // The element itself, or (for a number) the one or two elements around it.
+            let box = isBadgeBox(el, rowMuted) ? el : null;
+            for (let up = el.parentElement, k = 0; !box && txt && up && up !== row && k < 2; up = up.parentElement, k++) {
+              if (isBadgeBox(up, rowMuted)) box = up;
+            }
+            if (!box || counted.has(box)) continue;
+            counted.add(box);
             if (!rowMuted) {
               const v = parseNum(txt);
               rowCount += v > 0 ? v : 1;

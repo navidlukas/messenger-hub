@@ -115,6 +115,9 @@ namespace MessengerHub
             public IntPtr dwExtraInfo;
         }
 
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
 
@@ -540,7 +543,8 @@ namespace MessengerHub
             sidebar.Width = S(SidebarWidth);
             sidebar.BackColor = SidebarColor;
 
-            accountList.Dock = DockStyle.Fill;
+            // Not docked: LayoutSidebar makes it a little wider than the sidebar, so a scroll bar
+            // (only when there are too many accounts even at the smallest size) falls outside it, out of sight.
             accountList.FlowDirection = FlowDirection.TopDown;
             accountList.WrapContents = false;
             accountList.AutoScroll = true;
@@ -560,6 +564,9 @@ namespace MessengerHub
 
             accountList.Controls.Add(addButton);
             sidebar.Controls.Add(accountList);
+            sidebar.Resize += (s, e) => LayoutSidebar();
+            accountList.ControlAdded += (s, e) => LayoutSidebar();
+            accountList.ControlRemoved += (s, e) => LayoutSidebar();
 
             // Line that shows where a dragged icon will land.
             dropIndicator.BackColor = Color.White;
@@ -2612,21 +2619,55 @@ namespace MessengerHub
             }
         }
 
+        // The window's own monitor scaling, once it exists (Windows' main-screen value can be stale
+        // after a monitor is plugged in or out, until you sign out).
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                uint dpi = GetDpiForWindow(Handle);
+                if (dpi > 0 && Math.Abs(dpi / 96f - scale) > 0.001f) { scale = dpi / 96f; ApplyScale(); }
+            }
+            catch { } // older Windows: keep the main-screen value
+        }
+
         /// <summary>Re-applies every DPI-dependent size (after a move to a monitor with different scaling).</summary>
         private void ApplyScale()
         {
             MinimumSize = new Size(S(700), S(450));
             sidebar.Width = S(SidebarWidth);
             accountList.Padding = new Padding(0, S(6), 0, 0);
-            addButton.Size = new Size(S(SidebarWidth), S(ButtonHeight));
             foreach (var a in accounts)
-            {
-                a.Button.Size = new Size(S(SidebarWidth), S(ButtonHeight));
                 if (a.BrowserBar != null) a.BrowserBar.Height = S(36);
-            }
             dropIndicator.Height = Math.Max(2, S(2));
             dropIndicator.Width = S(SidebarWidth) - S(8);
             dropIndicator.Left = S(4);
+            LayoutSidebar();
+        }
+
+        private bool layingOutSidebar;
+
+        /// <summary>
+        /// Sizes the sidebar icons so they all fit the window height: full size when there is room, smaller
+        /// (down to about 70%) when there are many accounts or the screen is short. If even that doesn't fit,
+        /// the list scrolls with the mouse wheel, with its scroll bar kept out of sight.
+        /// </summary>
+        private void LayoutSidebar()
+        {
+            if (layingOutSidebar || sidebar.ClientSize.Height <= 0) return;
+            layingOutSidebar = true;
+            try
+            {
+                accountList.SetBounds(0, 0, sidebar.ClientSize.Width + S(30), sidebar.ClientSize.Height);
+                int count = accountList.Controls.Count;
+                int room = sidebar.ClientSize.Height - accountList.Padding.Vertical;
+                int height = Math.Max(S(30), Math.Min(S(ButtonHeight), count > 0 ? room / count : S(ButtonHeight)));
+                var size = new Size(S(SidebarWidth), height);
+                foreach (Control c in accountList.Controls)
+                    if (c.Size != size) c.Size = size;
+            }
+            finally { layingOutSidebar = false; }
         }
 
         private static IntPtr MakeTaskbarOverlayHIcon(string text)

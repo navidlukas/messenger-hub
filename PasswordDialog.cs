@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace MessengerHub
@@ -27,10 +28,40 @@ namespace MessengerHub
                 Font = new Font("Segoe UI", 9.5f),
                 BackColor = Color.White,
             };
-            f.AutoScaleDimensions = new SizeF(96f, 96f);
-            f.AutoScaleMode = AutoScaleMode.Dpi;
+            // Laid out at 96 DPI and scaled on Load to the scaling of the screen it opens on.
+            f.AutoScaleMode = AutoScaleMode.None;
+            f.Load += (s, e) => ScaleToScreen(f);
             try { f.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             return f;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        /// <summary>
+        /// Scales the layout and fonts together by the window's own screen scaling, so text and boxes always
+        /// match (Windows' main-screen value can be stale after a monitor is plugged in or out).
+        /// </summary>
+        private static void ScaleToScreen(Form f)
+        {
+            float k = 1f;
+            try { uint dpi = GetDpiForWindow(f.Handle); if (dpi > 0) k = dpi / 96f; } catch { }
+
+            // Fonts in pixels, so they don't follow a different scaling than the layout.
+            var own = new System.Collections.Generic.List<Control>();
+            foreach (Control c in f.Controls) if (!ReferenceEquals(c.Font, f.Font)) own.Add(c);
+            Func<Font, Font> Px = font => new Font(font.FontFamily, font.SizeInPoints * 96f / 72f * k, font.Style, GraphicsUnit.Pixel);
+            foreach (var c in own) c.Font = Px(c.Font);
+            f.Font = Px(f.Font);
+
+            var client = f.ClientSize;
+            foreach (Control c in f.Controls)
+                c.Bounds = new Rectangle((int)Math.Round(c.Left * k), (int)Math.Round(c.Top * k),
+                                         (int)Math.Round(c.Width * k), (int)Math.Round(c.Height * k));
+            f.ClientSize = new Size((int)Math.Round(client.Width * k), (int)Math.Round(client.Height * k));
+
+            var area = Screen.FromHandle(f.Handle).WorkingArea;
+            f.Location = new Point(area.Left + (area.Width - f.Width) / 2, area.Top + (area.Height - f.Height) / 2);
         }
 
         private static Label Info(string text, int top) => new Label
